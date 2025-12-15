@@ -153,6 +153,7 @@ try:
                 if len(status_list) < 288:
                     status_list += ["×"] * (288 - len(status_list))
 
+                # collected_dataに、areaも含めた6つの要素を追加している
                 collected_data.append([area, station_name, plate, model, start_time_str, "".join(status_list)])
             except Exception as e:
                 print(f"警告: 解析エラー {raw_car_text}: {e}")
@@ -169,6 +170,8 @@ finally:
 # ==========================================================
 if collected_data:
     print("\n[III.データ保存] シートへ書き込みます...")
+    
+    # ★★★ 修正箇所: ここで'city'列を含めた6列の名前を定義する ★★★
     columns = ['city', 'station', 'plate', 'model', 'getTime', 'rsvData']
     df_output = pd.DataFrame(collected_data, columns=columns)
 
@@ -179,3 +182,21 @@ if collected_data:
         
         area_name = str(area).replace('市', '').strip()
         work_sheet_name = f"{area_name}_更新用"
+        
+        # ★★★ 修正箇所: 書き込みの前に、シートに不要な'city'列を削除する ★★★
+        # シートには5列（station, plate, model, getTime, rsvData）だけを書き込む
+        df_to_write = df_area.drop(columns=['city']) 
+        
+        try: ws_work = sh_prod.worksheet(work_sheet_name)
+        except gspread.WorksheetNotFound: ws_work = sh_prod.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
+        
+        # ヘッダーとデータをリスト化
+        data_to_upload = [df_to_write.columns.values.tolist()] + df_to_write.values.tolist()
+        
+        ws_work.clear()
+        ws_work.update(data_to_upload, range_name='A1')
+        
+        print(f"   -> '{work_sheet_name}' シート更新完了")
+    print(f"\n【完了】データ保存完了")
+else:
+    print("!! データなし")
