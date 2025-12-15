@@ -3,8 +3,10 @@
 # 機能: 3色判定 + 進捗書き込み機能付き
 # ==========================================================
 import sys
+import os
 import pandas as pd
 import gspread
+from time import sleep
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -12,8 +14,6 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from bs4 import BeautifulSoup
-from time import sleep
-import os
 
 # 1. ログイン情報設定
 LOGIN_URL = "https://dailycheck.tc-extsys.jp/tcrappsweb/web/login/tawLogin.html"
@@ -151,7 +151,7 @@ try:
                         else: status_list.append("×")
                             
                 if len(status_list) < 288:
-                     status_list += ["×"] * (288 - len(status_list))
+                    status_list += ["×"] * (288 - len(status_list))
 
                 collected_data.append([area, station_name, plate, model, start_time_str, "".join(status_list)])
             except Exception as e:
@@ -179,21 +179,3 @@ if collected_data:
         
         area_name = str(area).replace('市', '').strip()
         work_sheet_name = f"{area_name}_更新用"
-        df_to_write = df_area.drop(columns=['city'])
-
-        try: ws_work = sh_prod.worksheet(work_sheet_name)
-        except gspread.WorksheetNotFound: ws_work = sh_prod.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
-        
-        data_to_upload = [df_to_write.columns.values.tolist()] + df_to_write.values.tolist()
-        ws_work.clear()
-        ws_work.update(data_to_upload, range_name='A1')
-
-        try: ws_display = sh_prod.worksheet(area_name)
-        except gspread.WorksheetNotFound: ws_display = sh_prod.add_worksheet(title=area_name, rows=len(df_area)+10, cols=10)
-
-        ws_display.clear()
-        ws_display.update(data_to_upload, range_name='A1')
-        print(f"   -> '{area_name}' タブ更新完了")
-    print(f"\n【完了】データ保存完了")
-else:
-    print("!! データなし")
