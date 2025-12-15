@@ -1,0 +1,29 @@
+name: Manual Patrol Check
+
+on:
+  workflow_dispatch: # 手動実行用トリガー
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Create Service Account Key
+        # SecretsからJSONファイルを生成します
+        run: |
+          echo '${{ secrets.GCP_SA_KEY }}' > service_account.json
+
+      - name: Run Patrol Script
+        run: python main.py
