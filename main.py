@@ -1,5 +1,6 @@
 # ==========================================================
 # 【GitHub Actions用】3エリア巡回システム
+# 機能: 3色判定 + 進捗書き込み機能付き
 # ==========================================================
 import sys
 import pandas as pd
@@ -25,8 +26,7 @@ PRODUCTION_SHEET_URL = "https://docs.google.com/spreadsheets/d/13cQngK_Xx38VU67y
 CSV_FILE_NAME = "station_code_map.csv"
 
 # 3. Google認証
-# GitHub Actionsのワークフロー側で、Secretからこの名前のファイルを生成させます
-SERVICE_ACCOUNT_KEY_FILE = "service_account.json" 
+SERVICE_ACCOUNT_KEY_FILE = "service_account.json"
 
 if not os.path.exists(SERVICE_ACCOUNT_KEY_FILE):
     print("!! エラー: 認証キーファイルが見つかりません。Secretsの設定を確認してください。")
@@ -39,7 +39,7 @@ gc = gspread.service_account(filename=SERVICE_ACCOUNT_KEY_FILE)
 # ==========================================================
 print(f"\n[I.リスト読み込み] '{CSV_FILE_NAME}' を読み込みます...")
 if not os.path.exists(CSV_FILE_NAME):
-    raise FileNotFoundError(f"エラー: '{CSV_FILE_NAME}' が見つかりません。リポジトリに含まれていますか？")
+    raise FileNotFoundError(f"エラー: '{CSV_FILE_NAME}' が見つかりません。")
 
 df_map = pd.read_csv(CSV_FILE_NAME)
 df_map.columns = df_map.columns.str.strip()
@@ -60,18 +60,33 @@ if len(target_stations) == 0: sys.exit()
 # ==========================================================
 print("\n[II.データ収集] 巡回を開始します...")
 
+# シート準備（進捗書き込み用）
+prod_sh_key = PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
+sh_prod = gc.open_by_key(prod_sh_key)
+
 options = Options()
 options.add_argument('--headless')
 options.add_argument('--no-sandbox')
 options.add_argument('--disable-dev-shm-usage')
 options.add_argument('--window-size=1920,1080')
 
-# GitHub Actions上でのドライバセットアップ（webdriver_managerを使用）
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 collected_data = []
 
 try:
     for i, item in enumerate(target_stations):
+        # --- 進捗保存機能 (20件ごと) ---
+        if (i > 0) and (i % 20 == 0):
+            try:
+                try: ws_status = sh_prod.worksheet("SystemStatus")
+                except: ws_status = sh_prod.add_worksheet(title="SystemStatus", rows=5, cols=5)
+                # B1セルに現在の完了数、C1セルに全件数を書き込み
+                ws_status.update([["progress", i, len(target_stations)]], "A1")
+                print(f"--- 進捗保存: {i}/{len(target_stations)} ---")
+            except Exception as e:
+                print(f"進捗保存エラー(無視します): {e}")
+        # -----------------------------
+
         raw_city = str(item.get('city', 'other')).strip()
         area = raw_city if raw_city and raw_city != 'nan' else 'other'
         station_name = item.get('station', '不明なステーション')
@@ -154,8 +169,6 @@ finally:
 # ==========================================================
 if collected_data:
     print("\n[III.データ保存] シートへ書き込みます...")
-    prod_sh_key = PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
-    sh_prod = gc.open_by_key(prod_sh_key)
     columns = ['city', 'station', 'plate', 'model', 'getTime', 'rsvData']
     df_output = pd.DataFrame(collected_data, columns=columns)
 
