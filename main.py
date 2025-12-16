@@ -1,5 +1,5 @@
 # ==========================================================
-# 【GitHub Actions用】3エリア巡回システム (テストモード: JH88限定)
+# 【GitHub Actions用】3エリア巡回システム (修正版v2)
 # 機能: 3色判定 + 終了時ステータス強制リセット + セル結合対応(時間ズレ完全修正)
 # ==========================================================
 import sys
@@ -52,16 +52,8 @@ filter_mask = df_map['status'].astype(str).str.lower().isin(['checked', 'unneces
 df_active = df_map[~filter_mask].copy()
 
 target_stations = df_active.drop_duplicates(subset=['stationCd']).to_dict('records')
-
-# ★★★ テスト用修正: ID 'JH88' のみに絞り込み ★★★
-print(f"全対象: {len(target_stations)} 件 -> 'JH88' を検索中...")
-target_stations = [s for s in target_stations if str(s.get('stationCd')) == 'JH88']
-
-if not target_stations:
-    print("!! エラー: テスト対象の 'JH88' がリストに見つかりませんでした。CSVを確認してください。")
-    sys.exit(1)
-
-print(f"-> 巡回対象(テスト): {len(target_stations)} カ所 (JH88のみ)")
+print(f"-> 巡回対象: {len(target_stations)} カ所")
+if len(target_stations) == 0: sys.exit()
 
 # ==========================================================
 # ドライバ設定 & 変数初期化
@@ -75,7 +67,7 @@ options.add_argument('--window-size=1920,1080')
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 collected_data = []
 
-# ★安全装置: try...finally で終了時に必ずステータスを消す
+# ★ステータスリセットのための try...finally ブロック
 try:
     # ==========================================================
     # II. データ収集
@@ -87,7 +79,7 @@ try:
     sh_prod = gc.open_by_key(prod_sh_key)
 
     for i, item in enumerate(target_stations):
-        # --- 進捗保存機能 (今回は1件なのでスキップされることが多いが一応残す) ---
+        # --- 進捗保存機能 (20件ごと) ---
         if (i > 0) and (i % 20 == 0):
             try:
                 try: ws_status = sh_prod.worksheet("SystemStatus")
@@ -103,8 +95,8 @@ try:
         station_name = item.get('station', '不明なステーション')
         station_cd = str(item.get('stationCd', '')).replace('.0', '')
 
-        # ログイン処理 (初回のみ)
-        if i == 0:
+        # ログイン処理
+        if i == 0 or (i % 20 == 0):
             driver.get(LOGIN_URL)
             sleep(5)
             try:
@@ -153,7 +145,9 @@ try:
                 rows = table.find_all("tr")
                 status_list = []
                 
-                # ★修正: 結合セル(colspan)対応でズレを直す
+                # ★修正: 前回の強制パディング(["○", "○"...])は削除しました
+                # 代わりに colspan を判定して正しい長さを追加します
+
                 if len(rows) >= 3:
                     data_cells = rows[2].find_all("td")
                     for cell in data_cells:
@@ -164,13 +158,14 @@ try:
                         elif "vacant" in classes: symbol = "○"
                         else: symbol = "×"
                         
-                        # colspan（セルの結合数）を取得。なければ1。
+                        # ★ここが修正の核心: colspan（セルの結合数）を取得
+                        # colspan="4" なら 15分×4 = 1時間分 として扱います
                         try:
                             colspan = int(cell.get("colspan", 1))
                         except:
                             colspan = 1
                         
-                        # 結合数分だけリストに追加（例: 1時間結合なら4個追加）
+                        # 結合分の回数だけリストに追加
                         for _ in range(colspan):
                             status_list.append(symbol)
                             
@@ -204,8 +199,8 @@ try:
             try: ws_work = sh_prod.worksheet(work_sheet_name)
             except gspread.WorksheetNotFound: ws_work = sh_prod.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
             
-            # 既存データをクリアして書き込み
             data_to_upload = [df_to_write.columns.values.tolist()] + df_to_write.values.tolist()
+            
             ws_work.clear()
             ws_work.update(data_to_upload, range_name='A1')
             
@@ -235,7 +230,7 @@ finally:
         except: ws_status_fin = sh_prod_fin.add_worksheet(title="SystemStatus", rows=5, cols=5)
         
         ws_status_fin.clear()
-        print("-> ステータスシートのクリア完了 (テスト完了)")
+        print("-> ステータスシートのクリア完了")
         
     except Exception as e:
         print(f"!! 警告: ステータスのリセットに失敗しました: {e}")
