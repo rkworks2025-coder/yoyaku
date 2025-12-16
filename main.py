@@ -1,6 +1,6 @@
 # ==========================================================
 # 【GitHub Actions用】3エリア巡回システム
-# 機能: 3色判定 + 進捗書き込み機能付き
+# 機能: 3色判定 + 終了時ステータス強制リセット機能付き
 # ==========================================================
 import sys
 import os
@@ -56,14 +56,8 @@ print(f"-> 巡回対象: {len(target_stations)} カ所")
 if len(target_stations) == 0: sys.exit()
 
 # ==========================================================
-# II. データ収集
+# ドライバ設定 & 変数初期化
 # ==========================================================
-print("\n[II.データ収集] 巡回を開始します...")
-
-# シート準備（進捗書き込み用）
-prod_sh_key = PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
-sh_prod = gc.open_by_key(prod_sh_key)
-
 options = Options()
 options.add_argument('--headless')
 options.add_argument('--no-sandbox')
@@ -73,7 +67,17 @@ options.add_argument('--window-size=1920,1080')
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 collected_data = []
 
+# ★変更点: 全体をtryで囲み、最後に必ずステータスを消去するように修正
 try:
+    # ==========================================================
+    # II. データ収集
+    # ==========================================================
+    print("\n[II.データ収集] 巡回を開始します...")
+
+    # シート準備（進捗書き込み用）
+    prod_sh_key = PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
+    sh_prod = gc.open_by_key(prod_sh_key)
+
     for i, item in enumerate(target_stations):
         # --- 進捗保存機能 (20件ごと) ---
         if (i > 0) and (i % 20 == 0):
@@ -153,50 +157,66 @@ try:
                 if len(status_list) < 288:
                     status_list += ["×"] * (288 - len(status_list))
 
-                # collected_dataに、areaも含めた6つの要素を追加している
                 collected_data.append([area, station_name, plate, model, start_time_str, "".join(status_list)])
             except Exception as e:
                 print(f"警告: 解析エラー {raw_car_text}: {e}")
         sleep(2)
 
+    # ==========================================================
+    # III. 本番シートへの書き込み
+    # ==========================================================
+    if collected_data:
+        print("\n[III.データ保存] シートへ書き込みます...")
+        
+        columns = ['city', 'station', 'plate', 'model', 'getTime', 'rsvData']
+        df_output = pd.DataFrame(collected_data, columns=columns)
+
+        unique_areas = df_output['city'].unique()
+        for area in unique_areas:
+            df_area = df_output[df_output['city'] == area].copy()
+            if df_area.empty: continue
+            
+            area_name = str(area).replace('市', '').strip()
+            work_sheet_name = f"{area_name}_更新用"
+            
+            df_to_write = df_area.drop(columns=['city']) 
+            
+            try: ws_work = sh_prod.worksheet(work_sheet_name)
+            except gspread.WorksheetNotFound: ws_work = sh_prod.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
+            
+            data_to_upload = [df_to_write.columns.values.tolist()] + df_to_write.values.tolist()
+            
+            ws_work.clear()
+            ws_work.update(data_to_upload, range_name='A1')
+            
+            print(f"   -> '{work_sheet_name}' シート更新完了")
+        print(f"\n【完了】データ保存完了")
+    else:
+        print("!! データなし")
+
 except Exception as e:
-    print(f"\n!! エラー発生: {e}")
+    print(f"\n!! 重大なエラー発生: {e}")
+    # 必要に応じてここでエラー通知などを飛ばすことも可能
 
 finally:
-    driver.quit()
-
-# ==========================================================
-# III. 本番シートへの書き込み
-# ==========================================================
-if collected_data:
-    print("\n[III.データ保存] シートへ書き込みます...")
+    # ==========================================================
+    # IV. 終了処理 (ドライバ停止 & ステータス強制クリア)
+    # ==========================================================
+    if 'driver' in locals():
+        driver.quit()
     
-    # ★★★ 修正箇所: ここで'city'列を含めた6列の名前を定義する ★★★
-    columns = ['city', 'station', 'plate', 'model', 'getTime', 'rsvData']
-    df_output = pd.DataFrame(collected_data, columns=columns)
-
-    unique_areas = df_output['city'].unique()
-    for area in unique_areas:
-        df_area = df_output[df_output['city'] == area].copy()
-        if df_area.empty: continue
+    print("\n[終了処理] スプレッドシートのステータスをリセットします...")
+    try:
+        # 念のため再度認証して接続（長時間稼働後のタイムアウト対策）
+        prod_sh_key_fin = PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
+        sh_prod_fin = gc.open_by_key(prod_sh_key_fin)
         
-        area_name = str(area).replace('市', '').strip()
-        work_sheet_name = f"{area_name}_更新用"
+        try: ws_status_fin = sh_prod_fin.worksheet("SystemStatus")
+        except: ws_status_fin = sh_prod_fin.add_worksheet(title="SystemStatus", rows=5, cols=5)
         
-        # ★★★ 修正箇所: 書き込みの前に、シートに不要な'city'列を削除する ★★★
-        # シートには5列（station, plate, model, getTime, rsvData）だけを書き込む
-        df_to_write = df_area.drop(columns=['city']) 
+        # ★ここが重要: 進捗セルをクリアして、アプリ側のボタンを「更新開始」に戻す
+        ws_status_fin.clear()
+        print("-> ステータスシートのクリア完了 (アプリのボタンが復活しました)")
         
-        try: ws_work = sh_prod.worksheet(work_sheet_name)
-        except gspread.WorksheetNotFound: ws_work = sh_prod.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
-        
-        # ヘッダーとデータをリスト化
-        data_to_upload = [df_to_write.columns.values.tolist()] + df_to_write.values.tolist()
-        
-        ws_work.clear()
-        ws_work.update(data_to_upload, range_name='A1')
-        
-        print(f"   -> '{work_sheet_name}' シート更新完了")
-    print(f"\n【完了】データ保存完了")
-else:
-    print("!! データなし")
+    except Exception as e:
+        print(f"!! 警告: ステータスのリセットに失敗しました: {e}")
