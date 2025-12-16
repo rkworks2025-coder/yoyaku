@@ -1,6 +1,6 @@
 # ==========================================================
-# 【GitHub Actions用】3エリア巡回システム (修正版v2)
-# 機能: 3色判定 + 終了時ステータス強制リセット + セル結合対応(時間ズレ完全修正)
+# 【GitHub Actions用】3エリア巡回システム (7days_rule対応版)
+# 機能: 3色判定 + 終了時ステータス強制リセット + セル結合対応
 # ==========================================================
 import sys
 import os
@@ -48,7 +48,9 @@ if 'area' in df_map.columns: df_map = df_map.rename(columns={'area': 'city'})
 if 'station_name' in df_map.columns: df_map = df_map.rename(columns={'station_name': 'station'})
 
 if 'status' not in df_map.columns: df_map['status'] = ""
-filter_mask = df_map['status'].astype(str).str.lower().isin(['checked', 'unnecessary'])
+
+# ★修正点: 除外リストに '7days_rule' を追加
+filter_mask = df_map['status'].astype(str).str.lower().isin(['checked', 'unnecessary', '7days_rule'])
 df_active = df_map[~filter_mask].copy()
 
 target_stations = df_active.drop_duplicates(subset=['stationCd']).to_dict('records')
@@ -67,7 +69,7 @@ options.add_argument('--window-size=1920,1080')
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 collected_data = []
 
-# ★ステータスリセットのための try...finally ブロック
+# ★安全装置: try...finally で終了時に必ずステータスを消す
 try:
     # ==========================================================
     # II. データ収集
@@ -84,6 +86,7 @@ try:
             try:
                 try: ws_status = sh_prod.worksheet("SystemStatus")
                 except: ws_status = sh_prod.add_worksheet(title="SystemStatus", rows=5, cols=5)
+                # B1セルに現在の完了数、C1セルに全件数を書き込み
                 ws_status.update([["progress", i, len(target_stations)]], "A1")
                 print(f"--- 進捗保存: {i}/{len(target_stations)} ---")
             except Exception as e:
@@ -145,27 +148,21 @@ try:
                 rows = table.find_all("tr")
                 status_list = []
                 
-                # ★修正: 前回の強制パディング(["○", "○"...])は削除しました
-                # 代わりに colspan を判定して正しい長さを追加します
-
+                # ★修正: 結合セル(colspan)対応済み
                 if len(rows) >= 3:
                     data_cells = rows[2].find_all("td")
                     for cell in data_cells:
                         classes = cell.get("class", [])
                         
-                        # 判定
                         if "impossible" in classes: symbol = "s"
                         elif "vacant" in classes: symbol = "○"
                         else: symbol = "×"
                         
-                        # ★ここが修正の核心: colspan（セルの結合数）を取得
-                        # colspan="4" なら 15分×4 = 1時間分 として扱います
                         try:
                             colspan = int(cell.get("colspan", 1))
                         except:
                             colspan = 1
                         
-                        # 結合分の回数だけリストに追加
                         for _ in range(colspan):
                             status_list.append(symbol)
                             
