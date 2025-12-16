@@ -1,6 +1,6 @@
 # ==========================================================
-# 【GitHub Actions用】3エリア巡回システム (修正版)
-# 機能: 3色判定 + 終了時ステータス強制リセット + 1時間ズレ補正
+# 【GitHub Actions用】3エリア巡回システム (テストモード: JH88限定)
+# 機能: 3色判定 + 終了時ステータス強制リセット + セル結合対応(時間ズレ完全修正)
 # ==========================================================
 import sys
 import os
@@ -52,8 +52,16 @@ filter_mask = df_map['status'].astype(str).str.lower().isin(['checked', 'unneces
 df_active = df_map[~filter_mask].copy()
 
 target_stations = df_active.drop_duplicates(subset=['stationCd']).to_dict('records')
-print(f"-> 巡回対象: {len(target_stations)} カ所")
-if len(target_stations) == 0: sys.exit()
+
+# ★★★ テスト用修正: ID 'JH88' のみに絞り込み ★★★
+print(f"全対象: {len(target_stations)} 件 -> 'JH88' を検索中...")
+target_stations = [s for s in target_stations if str(s.get('stationCd')) == 'JH88']
+
+if not target_stations:
+    print("!! エラー: テスト対象の 'JH88' がリストに見つかりませんでした。CSVを確認してください。")
+    sys.exit(1)
+
+print(f"-> 巡回対象(テスト): {len(target_stations)} カ所 (JH88のみ)")
 
 # ==========================================================
 # ドライバ設定 & 変数初期化
@@ -67,7 +75,7 @@ options.add_argument('--window-size=1920,1080')
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 collected_data = []
 
-# ★修正: 全体をtryで囲み、最後に必ずステータスをリセットする安全装置を追加
+# ★安全装置: try...finally で終了時に必ずステータスを消す
 try:
     # ==========================================================
     # II. データ収集
@@ -79,12 +87,11 @@ try:
     sh_prod = gc.open_by_key(prod_sh_key)
 
     for i, item in enumerate(target_stations):
-        # --- 進捗保存機能 (20件ごと) ---
+        # --- 進捗保存機能 (今回は1件なのでスキップされることが多いが一応残す) ---
         if (i > 0) and (i % 20 == 0):
             try:
                 try: ws_status = sh_prod.worksheet("SystemStatus")
                 except: ws_status = sh_prod.add_worksheet(title="SystemStatus", rows=5, cols=5)
-                # B1セルに現在の完了数、C1セルに全件数を書き込み
                 ws_status.update([["progress", i, len(target_stations)]], "A1")
                 print(f"--- 進捗保存: {i}/{len(target_stations)} ---")
             except Exception as e:
@@ -96,8 +103,8 @@ try:
         station_name = item.get('station', '不明なステーション')
         station_cd = str(item.get('stationCd', '')).replace('.0', '')
 
-        # ログイン処理
-        if i == 0 or (i % 20 == 0):
+        # ログイン処理 (初回のみ)
+        if i == 0:
             driver.get(LOGIN_URL)
             sleep(5)
             try:
@@ -146,17 +153,26 @@ try:
                 rows = table.find_all("tr")
                 status_list = []
                 
-                # ★修正: データが1時間前倒しになる問題を修正するため
-                # 先頭に強制的に1時間分(4コマ)の「空き」データを挿入してズレを補正
-                status_list = ["○", "○", "○", "○"] 
-
+                # ★修正: 結合セル(colspan)対応でズレを直す
                 if len(rows) >= 3:
                     data_cells = rows[2].find_all("td")
                     for cell in data_cells:
                         classes = cell.get("class", [])
-                        if "impossible" in classes: status_list.append("s")
-                        elif "vacant" in classes: status_list.append("○")
-                        else: status_list.append("×")
+                        
+                        # 判定
+                        if "impossible" in classes: symbol = "s"
+                        elif "vacant" in classes: symbol = "○"
+                        else: symbol = "×"
+                        
+                        # colspan（セルの結合数）を取得。なければ1。
+                        try:
+                            colspan = int(cell.get("colspan", 1))
+                        except:
+                            colspan = 1
+                        
+                        # 結合数分だけリストに追加（例: 1時間結合なら4個追加）
+                        for _ in range(colspan):
+                            status_list.append(symbol)
                             
                 if len(status_list) < 288:
                     status_list += ["×"] * (288 - len(status_list))
@@ -188,8 +204,8 @@ try:
             try: ws_work = sh_prod.worksheet(work_sheet_name)
             except gspread.WorksheetNotFound: ws_work = sh_prod.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
             
+            # 既存データをクリアして書き込み
             data_to_upload = [df_to_write.columns.values.tolist()] + df_to_write.values.tolist()
-            
             ws_work.clear()
             ws_work.update(data_to_upload, range_name='A1')
             
@@ -200,7 +216,6 @@ try:
 
 except Exception as e:
     print(f"\n!! 重大なエラー発生: {e}")
-    # 必要に応じてここでエラー通知などを飛ばすことも可能
 
 finally:
     # ==========================================================
@@ -211,10 +226,8 @@ finally:
     
     print("\n[終了処理] スプレッドシートのステータスをリセットします...")
     try:
-        # ★修正: どんな終わり方をしても、最後は確実にここを通って
+        # どんな終わり方をしても、最後は確実にここを通って
         # ステータスシートを消去し、アプリの「更新開始」ボタンを復活させる
-        
-        # 念のため再度認証して接続（長時間稼働後のタイムアウト対策）
         prod_sh_key_fin = PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
         sh_prod_fin = gc.open_by_key(prod_sh_key_fin)
         
@@ -222,7 +235,7 @@ finally:
         except: ws_status_fin = sh_prod_fin.add_worksheet(title="SystemStatus", rows=5, cols=5)
         
         ws_status_fin.clear()
-        print("-> ステータスシートのクリア完了 (アプリのボタンが復活しました)")
+        print("-> ステータスシートのクリア完了 (テスト完了)")
         
     except Exception as e:
         print(f"!! 警告: ステータスのリセットに失敗しました: {e}")
