@@ -1,6 +1,6 @@
 # ==========================================================
-# 【GitHub Actions用】3エリア巡回システム
-# 機能: 3色判定 + 終了時ステータス強制リセット機能付き
+# 【GitHub Actions用】3エリア巡回システム (修正版)
+# 機能: 3色判定 + 終了時ステータス強制リセット + 1時間ズレ補正
 # ==========================================================
 import sys
 import os
@@ -67,7 +67,7 @@ options.add_argument('--window-size=1920,1080')
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 collected_data = []
 
-# ★変更点: 全体をtryで囲み、最後に必ずステータスを消去するように修正
+# ★修正: 全体をtryで囲み、最後に必ずステータスをリセットする安全装置を追加
 try:
     # ==========================================================
     # II. データ収集
@@ -146,6 +146,10 @@ try:
                 rows = table.find_all("tr")
                 status_list = []
                 
+                # ★修正: データが1時間前倒しになる問題を修正するため
+                # 先頭に強制的に1時間分(4コマ)の「空き」データを挿入してズレを補正
+                status_list = ["○", "○", "○", "○"] 
+
                 if len(rows) >= 3:
                     data_cells = rows[2].find_all("td")
                     for cell in data_cells:
@@ -207,6 +211,9 @@ finally:
     
     print("\n[終了処理] スプレッドシートのステータスをリセットします...")
     try:
+        # ★修正: どんな終わり方をしても、最後は確実にここを通って
+        # ステータスシートを消去し、アプリの「更新開始」ボタンを復活させる
+        
         # 念のため再度認証して接続（長時間稼働後のタイムアウト対策）
         prod_sh_key_fin = PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
         sh_prod_fin = gc.open_by_key(prod_sh_key_fin)
@@ -214,7 +221,6 @@ finally:
         try: ws_status_fin = sh_prod_fin.worksheet("SystemStatus")
         except: ws_status_fin = sh_prod_fin.add_worksheet(title="SystemStatus", rows=5, cols=5)
         
-        # ★ここが重要: 進捗セルをクリアして、アプリ側のボタンを「更新開始」に戻す
         ws_status_fin.clear()
         print("-> ステータスシートのクリア完了 (アプリのボタンが復活しました)")
         
