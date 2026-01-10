@@ -1,7 +1,17 @@
 name: Manual Patrol Check
 
 on:
-  workflow_dispatch: # 手動実行用トリガー
+  workflow_dispatch:
+    inputs:
+      target_area:
+        description: '巡回エリア選択'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - kanagawa
+          - tama
 
 jobs:
   run-scraper:
@@ -21,9 +31,10 @@ jobs:
           pip install -r requirements.txt
 
       - name: Create Service Account Key
-        # SecretsからJSONファイルを生成します
         run: |
           echo '${{ secrets.GCP_SA_KEY }}' > service_account.json
 
       - name: Run Patrol Script
+        env:
+          TARGET_AREA: ${{ github.event.inputs.target_area }}
         run: python main.py
