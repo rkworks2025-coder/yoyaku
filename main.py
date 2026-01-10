@@ -1,6 +1,6 @@
 # ==========================================================
-# 【GitHub Actions用】3エリア巡回システム (7days_rule対応版)
-# 機能: 3色判定 + 終了時ステータス強制リセット + セル結合対応
+# 【GitHub Actions用】エリア選択対応・高速化版
+# 機能: エリア別実行 + sleep時間短縮 + 進捗保存
 # ==========================================================
 import sys
 import os
@@ -29,13 +29,24 @@ CSV_FILE_NAME = "station_code_map.csv"
 SERVICE_ACCOUNT_KEY_FILE = "service_account.json"
 
 if not os.path.exists(SERVICE_ACCOUNT_KEY_FILE):
-    print("!! エラー: 認証キーファイルが見つかりません。Secretsの設定を確認してください。")
+    print("!! エラー: 認証キーファイルが見つかりません。")
     sys.exit(1)
 
 gc = gspread.service_account(filename=SERVICE_ACCOUNT_KEY_FILE)
 
+# ★新機能: 環境変数からエリア選択を取得
+TARGET_AREA = os.environ.get('TARGET_AREA', 'all')  # デフォルトは全エリア
+print(f"\n[エリア選択] 実行モード: {TARGET_AREA}")
+
+# エリアマッピング定義
+AREA_MAPPING = {
+    'all': ['大和市', '海老名市', '多摩市'],
+    'kanagawa': ['大和市', '海老名市'],
+    'tama': ['多摩市']
+}
+
 # ==========================================================
-# I. リスト読み込み
+# I. リスト読み込み（エリアフィルタリング対応）
 # ==========================================================
 print(f"\n[I.リスト読み込み] '{CSV_FILE_NAME}' を読み込みます...")
 if not os.path.exists(CSV_FILE_NAME):
@@ -44,18 +55,31 @@ if not os.path.exists(CSV_FILE_NAME):
 df_map = pd.read_csv(CSV_FILE_NAME)
 df_map.columns = df_map.columns.str.strip()
 
-if 'area' in df_map.columns: df_map = df_map.rename(columns={'area': 'city'})
-if 'station_name' in df_map.columns: df_map = df_map.rename(columns={'station_name': 'station'})
+if 'area' in df_map.columns: 
+    df_map = df_map.rename(columns={'area': 'city'})
+if 'station_name' in df_map.columns: 
+    df_map = df_map.rename(columns={'station_name': 'station'})
 
-if 'status' not in df_map.columns: df_map['status'] = ""
+if 'status' not in df_map.columns: 
+    df_map['status'] = ""
 
-# ★修正点: 除外リストに '7days_rule' を追加
+# ★エリアフィルタリング
+target_cities = AREA_MAPPING.get(TARGET_AREA, AREA_MAPPING['all'])
+print(f"-> 対象エリア: {target_cities}")
+
+# エリアフィルタ適用
+df_map = df_map[df_map['city'].isin(target_cities)]
+
+# ステータスフィルタ適用（除外リストに '7days_rule' を含む）
 filter_mask = df_map['status'].astype(str).str.lower().isin(['checked', 'unnecessary', '7days_rule'])
 df_active = df_map[~filter_mask].copy()
 
 target_stations = df_active.drop_duplicates(subset=['stationCd']).to_dict('records')
 print(f"-> 巡回対象: {len(target_stations)} カ所")
-if len(target_stations) == 0: sys.exit()
+
+if len(target_stations) == 0:
+    print("!! 対象データがありません。終了します。")
+    sys.exit()
 
 # ==========================================================
 # ドライバ設定 & 変数初期化
@@ -72,7 +96,7 @@ collected_data = []
 # ★安全装置: try...finally で終了時に必ずステータスを消す
 try:
     # ==========================================================
-    # II. データ収集
+    # II. データ収集（高速化版）
     # ==========================================================
     print("\n[II.データ収集] 巡回を開始します...")
 
@@ -84,9 +108,11 @@ try:
         # --- 進捗保存機能 (20件ごと) ---
         if (i > 0) and (i % 20 == 0):
             try:
-                try: ws_status = sh_prod.worksheet("SystemStatus")
-                except: ws_status = sh_prod.add_worksheet(title="SystemStatus", rows=5, cols=5)
-                # B1セルに現在の完了数、C1セルに全件数を書き込み
+                try: 
+                    ws_status = sh_prod.worksheet("SystemStatus")
+                except: 
+                    ws_status = sh_prod.add_worksheet(title="SystemStatus", rows=5, cols=5)
+                
                 ws_status.update([["progress", i, len(target_stations)]], "A1")
                 print(f"--- 進捗保存: {i}/{len(target_stations)} ---")
             except Exception as e:
@@ -98,24 +124,24 @@ try:
         station_name = item.get('station', '不明なステーション')
         station_cd = str(item.get('stationCd', '')).replace('.0', '')
 
-        # ログイン処理
+        # ログイン処理（20件ごと）
         if i == 0 or (i % 20 == 0):
             driver.get(LOGIN_URL)
-            sleep(5)
+            sleep(3)  # ★高速化: 5秒 → 3秒
             try:
                 driver.find_element(By.ID, "cardNo1").send_keys(USER_ID_1)
                 driver.find_element(By.ID, "cardNo2").send_keys(USER_ID_2)
                 driver.find_element(By.ID, "password").send_keys(PASSWORD)
                 driver.find_element(By.ID, "password").send_keys(Keys.RETURN)
-                sleep(7)
+                sleep(4)  # ★高速化: 7秒 → 4秒
                 driver.get("https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStation.html")
-                sleep(3)
+                sleep(2)  # ★高速化: 3秒 → 2秒
             except Exception as e:
                 print(f"ログイン続行: {e}")
 
         print(f"[{i+1}/{len(target_stations)}] {station_name} ({area})...")
         driver.get(f"https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStationVehicle.html?stationCd={station_cd}")
-        sleep(4)
+        sleep(2)  # ★高速化: 4秒 → 2秒
 
         soup = BeautifulSoup(driver.page_source, "lxml")
         car_boxes = soup.find_all("div", class_="car-list-box")
@@ -129,9 +155,12 @@ try:
                 first_hour_cell = hour_row.find("td", class_="timeline")
                 if first_hour_cell:
                     raw_hour = first_hour_cell.get_text(strip=True)
-                    if raw_hour.isdigit(): start_time_str = f"{raw_hour}:00"
-                    else: start_time_str = raw_hour
-        except: pass
+                    if raw_hour.isdigit(): 
+                        start_time_str = f"{raw_hour}:00"
+                    else: 
+                        start_time_str = raw_hour
+        except: 
+            pass
 
         for box in car_boxes:
             try:
@@ -148,15 +177,18 @@ try:
                 rows = table.find_all("tr")
                 status_list = []
                 
-                # ★修正: 結合セル(colspan)対応済み
+                # 結合セル(colspan)対応
                 if len(rows) >= 3:
                     data_cells = rows[2].find_all("td")
                     for cell in data_cells:
                         classes = cell.get("class", [])
                         
-                        if "impossible" in classes: symbol = "s"
-                        elif "vacant" in classes: symbol = "○"
-                        else: symbol = "×"
+                        if "impossible" in classes: 
+                            symbol = "s"
+                        elif "vacant" in classes: 
+                            symbol = "○"
+                        else: 
+                            symbol = "×"
                         
                         try:
                             colspan = int(cell.get("colspan", 1))
@@ -172,7 +204,8 @@ try:
                 collected_data.append([area, station_name, plate, model, start_time_str, "".join(status_list)])
             except Exception as e:
                 print(f"警告: 解析エラー {raw_car_text}: {e}")
-        sleep(2)
+        
+        sleep(1)  # ★高速化: 2秒 → 1秒
 
     # ==========================================================
     # III. 本番シートへの書き込み
@@ -186,15 +219,18 @@ try:
         unique_areas = df_output['city'].unique()
         for area in unique_areas:
             df_area = df_output[df_output['city'] == area].copy()
-            if df_area.empty: continue
+            if df_area.empty: 
+                continue
             
             area_name = str(area).replace('市', '').strip()
             work_sheet_name = f"{area_name}_更新用"
             
             df_to_write = df_area.drop(columns=['city']) 
             
-            try: ws_work = sh_prod.worksheet(work_sheet_name)
-            except gspread.WorksheetNotFound: ws_work = sh_prod.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
+            try: 
+                ws_work = sh_prod.worksheet(work_sheet_name)
+            except gspread.WorksheetNotFound: 
+                ws_work = sh_prod.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
             
             data_to_upload = [df_to_write.columns.values.tolist()] + df_to_write.values.tolist()
             
@@ -218,13 +254,13 @@ finally:
     
     print("\n[終了処理] スプレッドシートのステータスをリセットします...")
     try:
-        # どんな終わり方をしても、最後は確実にここを通って
-        # ステータスシートを消去し、アプリの「更新開始」ボタンを復活させる
         prod_sh_key_fin = PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
         sh_prod_fin = gc.open_by_key(prod_sh_key_fin)
         
-        try: ws_status_fin = sh_prod_fin.worksheet("SystemStatus")
-        except: ws_status_fin = sh_prod_fin.add_worksheet(title="SystemStatus", rows=5, cols=5)
+        try: 
+            ws_status_fin = sh_prod_fin.worksheet("SystemStatus")
+        except: 
+            ws_status_fin = sh_prod_fin.add_worksheet(title="SystemStatus", rows=5, cols=5)
         
         ws_status_fin.clear()
         print("-> ステータスシートのクリア完了")
