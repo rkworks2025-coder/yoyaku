@@ -1,6 +1,6 @@
 # ==========================================================
-# 【GitHub Actions用】3エリア巡回システム (プランA: 高速・安定版)
-# 機能: 必要時のみログイン + 明示的待機による高速化 + セル結合対応
+# 【GitHub Actions用】3エリア巡回システム (プランA: 安全・厳格版)
+# 機能: 必要時のみログイン + ログイン処理の完全復元 + エラー即停止
 # ==========================================================
 import sys
 import os
@@ -13,8 +13,6 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 
 # 1. ログイン情報設定
@@ -31,7 +29,7 @@ CSV_FILE_NAME = "station_code_map.csv"
 SERVICE_ACCOUNT_KEY_FILE = "service_account.json"
 
 if not os.path.exists(SERVICE_ACCOUNT_KEY_FILE):
-    print("!! エラー: 認証キーファイルが見つかりません。Secretsの設定を確認してください。")
+    print("!! エラー: 認証キーファイルが見つかりません。")
     sys.exit(1)
 
 gc = gspread.service_account(filename=SERVICE_ACCOUNT_KEY_FILE)
@@ -51,7 +49,6 @@ if 'station_name' in df_map.columns: df_map = df_map.rename(columns={'station_na
 
 if 'status' not in df_map.columns: df_map['status'] = ""
 
-# 除外リスト対応
 filter_mask = df_map['status'].astype(str).str.lower().isin(['checked', 'unnecessary', '7days_rule'])
 df_active = df_map[~filter_mask].copy()
 
@@ -67,36 +64,35 @@ options.add_argument('--headless')
 options.add_argument('--no-sandbox')
 options.add_argument('--disable-dev-shm-usage')
 options.add_argument('--window-size=1920,1080')
-# ★高速化: 画像の読み込みを無効化
 options.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
 
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-wait = WebDriverWait(driver, 15)  # 最大15秒待機
 collected_data = []
 
 def perform_login():
-    """ログイン処理を実行する関数"""
-    print("-> ログインを実行します...")
+    """以前のコード(main20260110.py)から完全に復元したログイン手順"""
+    print("-> ログインを開始します...")
     driver.get(LOGIN_URL)
+    sleep(5)
     try:
-        wait.until(EC.presence_of_element_located((By.ID, "cardNo1")))
         driver.find_element(By.ID, "cardNo1").send_keys(USER_ID_1)
         driver.find_element(By.ID, "cardNo2").send_keys(USER_ID_2)
         driver.find_element(By.ID, "password").send_keys(PASSWORD)
         driver.find_element(By.ID, "password").send_keys(Keys.RETURN)
-        # ログイン後の遷移待ち
-        wait.until(EC.url_contains("routineStation"))
+        sleep(7)
+        # ログイン後にこのURLへ飛ぶ手順も確実に再現
+        driver.get("https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStation.html")
+        sleep(3)
         print("   -> ログイン成功")
     except Exception as e:
-        print(f"!! ログイン失敗: {e}")
+        print(f"!! ログインに失敗しました。スクリプトを停止します: {e}")
+        sys.exit(1) # ログイン失敗時は即座に終了
 
-# ★安全装置: try...finally
+# ==========================================================
+# II. データ収集
+# ==========================================================
 try:
-    # ==========================================================
-    # II. データ収集
-    # ==========================================================
     print("\n[II.データ収集] 巡回を開始します...")
-
     prod_sh_key = PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
     sh_prod = gc.open_by_key(prod_sh_key)
 
@@ -120,66 +116,66 @@ try:
 
         print(f"[{i+1}/{len(target_stations)}] {station_name}...")
         
-        # 巡回対象ページへ移動
         target_url = f"https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStationVehicle.html?stationCd={station_cd}"
         driver.get(target_url)
+        sleep(4)
 
-        # ★プランA核心部: ログイン画面に飛ばされたか判定
-        try:
-            # 短い待機でログイン項目があるか確認
-            login_box = driver.find_elements(By.ID, "cardNo1")
-            if len(login_box) > 0:
-                print("   [!] セッション切れを検知。再ログインします。")
-                perform_login()
-                driver.get(target_url) # 再度目的のページへ
-            
-            # 車両リストが表示されるまで待機（固定sleep廃止）
-            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "car-list-box")))
-        except Exception as e:
-            print(f"   [!] ページ読み込み遅延またはエラー(スキップ検討): {station_name}")
-            continue
+        # ログイン画面に飛ばされたか判定 (cardNo1があるか)
+        login_check = driver.find_elements(By.ID, "cardNo1")
+        if len(login_check) > 0:
+            print("   [!] セッション切れを検知しました。再ログインします。")
+            perform_login()
+            driver.get(target_url)
+            sleep(4)
 
         soup = BeautifulSoup(driver.page_source, "lxml")
         car_boxes = soup.find_all("div", class_="car-list-box")
 
-        # タイムテーブル開始時間の取得
+        # ページ構造が不正(データが取れない)場合は警告せず停止
+        if not car_boxes:
+            print(f"!! エラー: {station_name} の車両リスト(car-list-box)が見つかりません。")
+            sys.exit(1)
+
         start_time_str = "00:00"
-        try:
-            table = soup.find("table", class_="timetable")
-            rows = table.find_all("tr")
-            if len(rows) >= 2:
-                hour_row = rows[1]
-                first_hour_cell = hour_row.find("td", class_="timeline")
+        table_time = soup.find("table", class_="timetable")
+        if table_time:
+            rows_time = table_time.find_all("tr")
+            if len(rows_time) >= 2:
+                first_hour_cell = rows_time[1].find("td", class_="timeline")
                 if first_hour_cell:
                     raw_hour = first_hour_cell.get_text(strip=True)
                     start_time_str = f"{raw_hour}:00" if raw_hour.isdigit() else raw_hour
-        except: pass
 
         for box in car_boxes:
-            try:
-                raw_car_text = box.find("div", class_="car-list-title-area").get_text(strip=True)
-                parts = raw_car_text.split(" / ") if " / " in raw_car_text else [raw_car_text, ""]
+            # 各車両データの解析 (エラー時は即停止)
+            raw_car_text = box.find("div", class_="car-list-title-area").get_text(strip=True)
+            if " / " in raw_car_text:
+                parts = raw_car_text.split(" / ")
                 plate, model = parts[0].strip(), parts[1].strip()
+            else:
+                plate, model = raw_car_text, ""
 
-                table = box.find("table", class_="timetable")
-                rows = table.find_all("tr")
-                status_list = []
-                
-                if len(rows) >= 3:
-                    data_cells = rows[2].find_all("td")
-                    for cell in data_cells:
-                        classes = cell.get("class", [])
-                        symbol = "s" if "impossible" in classes else ("○" if "vacant" in classes else "×")
-                        colspan = int(cell.get("colspan", 1))
-                        for _ in range(colspan):
-                            status_list.append(symbol)
-                            
-                if len(status_list) < 288:
-                    status_list += ["×"] * (288 - len(status_list))
+            table = box.find("table", class_="timetable")
+            rows = table.find_all("tr")
+            status_list = []
+            
+            if len(rows) >= 3:
+                data_cells = rows[2].find_all("td")
+                for cell in data_cells:
+                    classes = cell.get("class", [])
+                    symbol = "s" if "impossible" in classes else ("○" if "vacant" in classes else "×")
+                    colspan = int(cell.get("colspan", 1))
+                    for _ in range(colspan):
+                        status_list.append(symbol)
+            else:
+                print(f"!! エラー: {plate} のステータス行が見つかりません。")
+                sys.exit(1)
+                        
+            if len(status_list) < 288:
+                status_list += ["×"] * (288 - len(status_list))
 
-                collected_data.append([area, station_name, plate, model, start_time_str, "".join(status_list)])
-            except Exception as e:
-                print(f"警告: 解析エラー {station_name}: {e}")
+            collected_data.append([area, station_name, plate, model, start_time_str, "".join(status_list)])
+        sleep(2)
 
     # ==========================================================
     # III. 本番シートへの書き込み
@@ -201,21 +197,22 @@ try:
             ws_work.update([df_to_write.columns.values.tolist()] + df_to_write.values.tolist(), range_name='A1')
             print(f"   -> '{work_sheet_name}' 更新完了")
     else:
-        print("!! データが収集されませんでした。")
+        print("!! データなし。終了します。")
+        sys.exit(1)
 
 except Exception as e:
-    print(f"\n!! 重大なエラー発生: {e}")
+    print(f"\n!! 重大なエラーが発生しました: {e}")
+    sys.exit(1)
 
 finally:
     if 'driver' in locals():
         driver.quit()
     
-    print("\n[終了処理] スプレッドシートのステータスをリセットします...")
+    # ステータスリセット (ここだけは安全に最後まで実行)
     try:
         sh_prod_fin = gc.open_by_key(PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0])
         try: ws_status_fin = sh_prod_fin.worksheet("SystemStatus")
         except: ws_status_fin = sh_prod_fin.add_worksheet(title="SystemStatus", rows=5, cols=5)
         ws_status_fin.clear()
-        print("-> リセット完了")
-    except Exception as e:
-        print(f"!! 警告: リセット失敗: {e}")
+        print("[終了処理] リセット完了")
+    except: pass
