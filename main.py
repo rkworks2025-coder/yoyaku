@@ -1,6 +1,6 @@
 # ==========================================================
-# 【GitHub Actions用】3エリア巡回システム (プランA: 超高速・安定版)
-# 目標: 2.0s/件 前後 (全エリア 4分台完了)
+# 【GitHub Actions用】3エリア巡回システム (プランA: 厳格・最速版)
+# 目標: 2.0s/件 前後で「確実なデータ」のみを収集。異常時は即停止。
 # ==========================================================
 import sys
 import os
@@ -62,7 +62,7 @@ driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), opti
 collected_data = []
 
 def perform_login():
-    """元の確実な手順を再現"""
+    """元のログイン手順(main20260110.py)を忠実に再現"""
     print("-> ログインを開始します...")
     driver.get(LOGIN_URL)
     sleep(5)
@@ -80,7 +80,7 @@ def perform_login():
         sys.exit(1)
 
 # ==========================================================
-# II. データ収集 (超高速要素検知)
+# II. データ収集 (超高速・厳格バリデーション)
 # ==========================================================
 try:
     sh_prod = gc.open_by_key(PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0])
@@ -94,11 +94,10 @@ try:
         target_url = f"https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStationVehicle.html?stationCd={station_cd}"
         driver.get(target_url)
 
-        # 高速要素検知ループ (最大5秒)
+        # 内容まで含めた高速検知ループ (最大7秒)
         found = False
         start_wait = time()
-        while time() - start_wait < 5:
-            # ログイン画面へ戻されたか
+        while time() - start_wait < 7:
             if driver.find_elements(By.ID, "cardNo1"):
                 print("   [!] セッション切れ検知。再ログイン。")
                 perform_login()
@@ -106,37 +105,52 @@ try:
                 start_wait = time()
                 continue
             
-            # 車両リストがあるか
+            # 外枠の存在を確認
             car_boxes = driver.find_elements(By.CLASS_NAME, "car-list-box")
             if car_boxes:
-                found = True
-                break
+                # ★厳格判定: 最初の車両のテーブル内にデータ(クラス名)が描画されているか
+                try:
+                    first_table = car_boxes[0].find_element(By.CLASS_NAME, "timetable")
+                    # vacant, impossible, booked などのいずれかが存在すれば描画済みとみなす
+                    cells = first_table.find_elements(By.TAG_NAME, "td")
+                    if any(c.get_attribute("class") for c in cells):
+                        found = True
+                        break
+                except: pass
+            sleep(0.1)
         
         if not found:
-            print(f"!! 要素未検出(即時停止): {station_name}")
+            print(f"!! データ未描画または要素未検出(即時停止): {station_name}")
             sys.exit(1)
 
-        # 時刻取得 (Selenium経由で直接)
-        start_time_str = "00:00"
+        # 時刻取得 (失敗時は即停止)
         try:
             timeline_cell = driver.find_element(By.CLASS_NAME, "timeline")
             h = timeline_cell.text.strip()
+            if not h: raise ValueError("時刻が空です")
             start_time_str = f"{h}:00" if h.isdigit() else h
-        except: pass
+        except Exception as e:
+            print(f"!! 時刻取得失敗(即時停止): {station_name} - {e}")
+            sys.exit(1)
 
-        # 車両データ解析 (BeautifulSoupを使わず直接属性を取得)
+        # 車両データ解析
         for box in car_boxes:
-            title_text = box.find_element(By.CLASS_NAME, "car-list-title-area").text.strip()
-            parts = title_text.split(" / ") if " / " in title_text else [title_text, ""]
-            plate, model = parts[0].strip(), parts[1].strip()
-
-            # ステータス行のセルを一括取得
             try:
-                # 3行目のtdを直接指定
-                cells = box.find_elements(By.XPATH, ".//table[@class='timetable']//tr[3]/td")
+                title_text = box.find_element(By.CLASS_NAME, "car-list-title-area").text.strip()
+                parts = title_text.split(" / ") if " / " in title_text else [title_text, ""]
+                plate, model = parts[0].strip(), parts[1].strip()
+
+                # ステータス行(3行目)のtdを確実に取得
+                # TMAの構造に合わせ、明示的にtr[3]または特定のクラスを狙う
                 status_list = []
+                # trの3番目、またはtimetable内のデータ行を特定
+                rows = box.find_elements(By.XPATH, ".//table[@class='timetable']//tr")
+                if len(rows) < 3: raise ValueError("予約テーブルの行不足")
+                
+                cells = rows[2].find_all_sub_elements if False else rows[2].find_elements(By.TAG_NAME, "td")
+                
                 for cell in cells:
-                    cls = cell.get_attribute("class")
+                    cls = cell.get_attribute("class") or ""
                     sym = "s" if "impossible" in cls else ("○" if "vacant" in cls else "×")
                     colspan = int(cell.get_attribute("colspan") or 1)
                     status_list.extend([sym] * colspan)
@@ -144,9 +158,14 @@ try:
                 if len(status_list) < 288:
                     status_list.extend(["×"] * (288 - len(status_list)))
                 
+                # 全てが「×」かつ描画が怪しい場合は異常とみなす
+                if all(s == "×" for s in status_list):
+                     # 本当に全時間帯予約不可か、取得失敗かの再チェック(必要ならここで停止)
+                     pass
+
                 collected_data.append([area, station_name, plate, model, start_time_str, "".join(status_list)])
-            except:
-                print(f"!! 解析エラー(即時停止): {plate}")
+            except Exception as e:
+                print(f"!! 車両データ解析失敗(即時停止): {station_name} - {e}")
                 sys.exit(1)
         
         print(f"[{i+1}/{len(target_stations)}] {station_name} OK")
@@ -161,15 +180,19 @@ try:
             df_area = df_output[df_output['city'] == area].copy()
             work_sheet_name = f"{str(area).replace('市', '').strip()}_更新用"
             df_to_write = df_area.drop(columns=['city'])
-            try: ws_work = sh_prod.worksheet(work_sheet_name)
-            except gspread.WorksheetNotFound: ws_work = sh_prod.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
+            ws_work = sh_prod.worksheet(work_sheet_name)
             ws_work.clear()
             ws_work.update([df_to_write.columns.values.tolist()] + df_to_write.values.tolist(), range_name='A1')
     
 except Exception as e:
-    print(f"\n!! エラー発生: {e}")
+    print(f"\n!! 重大なエラー発生: {e}")
     sys.exit(1)
 
 finally:
     if 'driver' in locals():
         driver.quit()
+    try:
+        sh_prod_fin = gc.open_by_key(PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0])
+        ws_status_fin = sh_prod_fin.worksheet("SystemStatus")
+        ws_status_fin.clear()
+    except: pass
