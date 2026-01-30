@@ -1,6 +1,6 @@
 # ==========================================================
-# 【GitHub Actions用】3エリア巡回システム (API通信・偽装高速版)
-# 目標: 1.5s ~ 2.2s/件 (全エリア 4分前後完了)
+# 【GitHub Actions用】3エリア巡回システム (API・リトライ強化版)
+# 目標: 1.5s ~ 2.0s/件 (全エリア 4分前後完了)
 # ==========================================================
 import sys
 import os
@@ -15,6 +15,7 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from bs4 import BeautifulSoup
 
 # 1. ログイン情報設定
 LOGIN_URL = "https://dailycheck.tc-extsys.jp/tcrappsweb/web/login/tawLogin.html"
@@ -47,7 +48,7 @@ target_stations = df_map.drop_duplicates(subset=['stationCd']).to_dict('records'
 print(f"-> 巡回対象: {len(target_stations)} カ所")
 
 # ==========================================================
-# II. セッション確立 (Selenium)
+# II. セッション確立
 # ==========================================================
 options = Options()
 options.add_argument('--headless')
@@ -58,7 +59,7 @@ driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), opti
 session = requests.Session()
 
 def sync_session():
-    """SeleniumのCookieをrequestsセッションに同期してBOT判定を回避"""
+    """Cookieとヘッダーを完全に同期"""
     print("-> ログインとセッション同期を開始します...")
     driver.get(LOGIN_URL)
     sleep(3)
@@ -68,20 +69,16 @@ def sync_session():
         driver.find_element(By.ID, "password").send_keys(PASSWORD)
         driver.find_element(By.ID, "password").send_keys(Keys.RETURN)
         sleep(5)
-        
-        # 巡回トップページへ移動してCookieを確定させる
         driver.get("https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStation.html")
         sleep(2)
         
-        # Cookie転送
         for cookie in driver.get_cookies():
             session.cookies.set(cookie['name'], cookie['value'])
         
-        # ヘッダー偽装
         session.headers.update({
-            'User-Agent': options.arguments[2].split('=')[1],
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Referer': 'https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStation.html',
-            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'X-Requested-With': 'XMLHttpRequest'
         })
         print("   -> セッション同期成功")
@@ -90,12 +87,11 @@ def sync_session():
         sys.exit(1)
 
 # ==========================================================
-# III. データ収集 (API直接通信・偽装モード)
+# III. データ収集 (リトライ機能付き)
 # ==========================================================
 try:
     sh_prod = gc.open_by_key(PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0])
     sync_session()
-    
     collected_data = []
 
     for i, item in enumerate(target_stations):
@@ -103,51 +99,55 @@ try:
         station_cd = str(item.get('stationCd', '')).replace('.0', '')
         area = str(item.get('city', 'other')).strip()
 
-        # BOT対策: 0.3〜0.8秒のランダムな揺らぎ
-        sleep(random.uniform(0.3, 0.8))
+        # BOT対策の揺らぎ (0.4〜0.9秒)
+        sleep(random.uniform(0.4, 0.9))
 
-        # APIエンドポイントへのリクエスト (描画を待たずに生データを取得)
-        api_url = f"https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStationVehicle.html?stationCd={station_cd}"
+        target_url = f"https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStationVehicle.html?stationCd={station_cd}"
         
-        try:
-            response = session.get(api_url, timeout=10)
-            
-            # セッション切れ判定 (ログイン画面の文字列が含まれているか)
-            if "tawLogin.html" in response.url or "cardNo1" in response.text:
-                print(f"   [!] セッション切れを検知。再同期中...")
+        # 最大2回試行 (初回 + 異常時リトライ)
+        response_text = ""
+        for attempt in range(2):
+            res = session.get(target_url, timeout=10)
+            if "tawLogin.html" in res.url:
                 sync_session()
-                response = session.get(api_url, timeout=10)
-
-            if response.status_code != 200:
-                raise ValueError(f"HTTPエラー: {response.status_code}")
-
-            # 解析処理 (レスポンスから直接データを抽出)
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(response.text, 'lxml')
-            car_boxes = soup.find_all("div", class_="car-list-box")
+                res = session.get(target_url, timeout=10)
             
-            if not car_boxes:
-                # データが空の場合、異常として即時停止
-                print(f"!! データ未検出(即時停止): {station_name}")
-                sys.exit(1)
+            # 構造チェック
+            if "car-list-box" in res.text:
+                response_text = res.text
+                break
+            
+            if attempt == 0:
+                print(f"   [!] {station_name}: 構造未検出のため0.5秒後にリトライ...")
+                sleep(0.5)
+        
+        if not response_text:
+            print(f"!! 構造異常(リトライ後も失敗): {station_name}")
+            sys.exit(1)
 
-            # 時刻取得
-            start_time_str = "00:00"
-            table_time = soup.find("table", class_="timetable")
-            if table_time:
-                time_cell = table_time.select_one("tr:nth-of-type(2) td.timeline")
-                if time_cell:
-                    h = time_cell.get_text(strip=True)
-                    start_time_str = f"{h}:00" if h.isdigit() else h
+        # 解析
+        soup = BeautifulSoup(response_text, 'lxml')
+        car_boxes = soup.find_all("div", class_="car-list-box")
+        
+        # 時刻取得 (厳格化)
+        try:
+            time_row = soup.select_one("table.timetable tr:nth-of-type(2)")
+            time_cell = time_row.find("td", class_="timeline") if time_row else None
+            if not time_cell: raise ValueError("時刻セル欠落")
+            h = time_cell.get_text(strip=True)
+            start_time_str = f"{h}:00" if h.isdigit() else h
+        except Exception as e:
+            print(f"!! 時刻取得失敗(即時停止): {station_name} - {e}")
+            sys.exit(1)
 
-            for box in car_boxes:
+        for box in car_boxes:
+            try:
                 title = box.find("div", class_="car-list-title-area").get_text(strip=True)
                 parts = title.split(" / ") if " / " in title else [title, ""]
                 plate, model = parts[0].strip(), parts[1].strip()
 
-                # ステータス解析
                 rows = box.select("table.timetable tr")
-                if len(rows) < 3: raise ValueError("構造異常")
+                if len(rows) < 3: raise ValueError("予約行不足")
                 
                 status_list = []
                 for cell in rows[2].find_all("td"):
@@ -159,20 +159,15 @@ try:
                 if len(status_list) < 288:
                     status_list.extend(["×"] * (288 - len(status_list)))
                 
-                # 異常データ（全て×）のチェック
-                if all(s == "×" for s in status_list):
-                    print(f"   [WARN] {plate} が全件×です。確認してください。")
-
                 collected_data.append([area, station_name, plate, model, start_time_str, "".join(status_list)])
-            
-            print(f"[{i+1}/{len(target_stations)}] {station_name} OK")
-
-        except Exception as e:
-            print(f"!! 通信・解析エラー(即時停止): {station_name} - {e}")
-            sys.exit(1)
+            except Exception as e:
+                print(f"!! 車両解析失敗(即時停止): {station_name} - {e}")
+                sys.exit(1)
+        
+        print(f"[{i+1}/{len(target_stations)}] {station_name} OK")
 
     # ==========================================================
-    # IV. 書き込み
+    # IV. 保存
     # ==========================================================
     if collected_data:
         print("\n[IV.データ保存] シートへ書き込み中...")
@@ -189,7 +184,5 @@ try:
 except Exception as e:
     print(f"\n!! 重大なエラー発生: {e}")
     sys.exit(1)
-
 finally:
-    if 'driver' in locals():
-        driver.quit()
+    if 'driver' in locals(): driver.quit()
