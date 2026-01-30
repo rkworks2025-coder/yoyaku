@@ -1,5 +1,5 @@
 # ==========================================================
-# 【GitHub Actions用】3エリア巡回システム (API・完全安定高速版)
+# 【GitHub Actions用】3エリア巡回システム (API・完全物理同期版)
 # 目標: 1.5s ~ 2.0s/件 (全エリア 4分前後完了)
 # ==========================================================
 import sys
@@ -15,6 +15,8 @@ from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 
 # 1. ログイン情報設定
@@ -48,19 +50,20 @@ target_stations = df_map.drop_duplicates(subset=['stationCd']).to_dict('records'
 print(f"-> 巡回対象: {len(target_stations)} カ所")
 
 # ==========================================================
-# II. セッション確立
+# II. セッション確立 (1件目の物理表示による強制同期)
 # ==========================================================
 options = Options()
 options.add_argument('--headless')
 options.add_argument('--no-sandbox')
 options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+options.page_load_strategy = 'normal' # 1件目は確実に待つ
 
 driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 session = requests.Session()
 
-def sync_session():
-    """Cookieとヘッダーを完全に同期。クッションページを挟むことで安定化。"""
-    print("-> ログインとセッション同期を開始します...")
+def sync_session_with_first_station(first_station_cd):
+    """1件目をブラウザで完全に表示させてからCookieを同期する"""
+    print("-> ログインと初回物理同期を開始します...")
     driver.get(LOGIN_URL)
     sleep(3)
     try:
@@ -68,36 +71,46 @@ def sync_session():
         driver.find_element(By.ID, "cardNo2").send_keys(USER_ID_2)
         driver.find_element(By.ID, "password").send_keys(PASSWORD)
         driver.find_element(By.ID, "password").send_keys(Keys.RETURN)
-        sleep(5)
         
-        # ★安定化の鍵: 一覧ページを完全に読み込み、セッションを確定させる
-        driver.get("https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStation.html")
-        sleep(5) 
+        # ログイン後の安定待ち
+        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "routineStationForm")))
         
+        # ★1件目(URプラザ永山)をブラウザで直接踏む
+        first_url = f"https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStationVehicle.html?stationCd={first_station_cd}"
+        driver.get(first_url)
+        
+        # 時刻セル(timeline)が描画されるまで最大15秒物理的に待つ
+        print("   -> 1件目の描画完了を待機中...")
+        WebDriverWait(driver, 15).until(
+            lambda d: d.find_element(By.CLASS_NAME, "timeline").text.strip() != ""
+        )
+        sleep(2) # 念押しの定着待ち
+        
+        # 描画完了した「本物」のCookieを同期
         for cookie in driver.get_cookies():
             session.cookies.set(cookie['name'], cookie['value'])
         
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStation.html',
+            'Referer': first_url,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'X-Requested-With': 'XMLHttpRequest'
         })
-        
-        # クッションリクエスト: API側にも一度トップページを叩かせておく
-        session.get("https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStation.html", timeout=15)
-        
-        print("   -> セッション同期成功")
+        print("   -> 物理同期成功。API巡回へ移行します。")
     except Exception as e:
-        print(f"!! セッション確立失敗: {e}")
+        print(f"!! 初期同期失敗: {e}")
         sys.exit(1)
 
 # ==========================================================
-# III. データ収集 (超高速バリデーション)
+# III. データ収集 (超高速API巡回)
 # ==========================================================
 try:
     sh_prod = gc.open_by_key(PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0])
-    sync_session()
+    
+    # 1件目のコードを使用して同期
+    first_cd = str(target_stations[0].get('stationCd', '')).replace('.0', '')
+    sync_session_with_first_station(first_cd)
+    
     collected_data = []
 
     for i, item in enumerate(target_stations):
@@ -105,32 +118,30 @@ try:
         station_cd = str(item.get('stationCd', '')).replace('.0', '')
         area = str(item.get('city', 'other')).strip()
 
-        # BOT対策の揺らぎ (0.4〜0.9秒)
+        # BOT対策の揺らぎ
         sleep(random.uniform(0.4, 0.9))
 
         target_url = f"https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStationVehicle.html?stationCd={station_cd}"
         
         valid_soup = None
-        # 最大4回試行 (初回 + リトライ3回)
+        # 最大4回試行 (初回 + 段階的バックオフ)
         for attempt in range(4):
             res = session.get(target_url, timeout=10)
             if "tawLogin.html" in res.url:
-                sync_session()
+                sync_session_with_first_station(station_cd)
                 res = session.get(target_url, timeout=10)
             
             temp_soup = BeautifulSoup(res.text, 'lxml')
-            
-            # 厳格判定: 車両枠と時刻セルが「中身を持って」存在するか
             car_boxes = temp_soup.find_all("div", class_="car-list-box")
             time_cell = temp_soup.find("td", class_="timeline")
             
+            # 厳格判定
             if car_boxes and time_cell and time_cell.get_text(strip=True):
                 valid_soup = temp_soup
                 break
             
             if attempt < 3:
-                # 待機時間を段階的に増やす(バックオフ)
-                wait_time = 0.8 + (attempt * 0.4)
+                wait_time = 1.0 + (attempt * 0.5)
                 print(f"   [!] {station_name}: データ未完成。{wait_time}秒後にリトライ({attempt+1}/3)...")
                 sleep(wait_time)
         
@@ -150,7 +161,7 @@ try:
                 plate, model = parts[0].strip(), parts[1].strip()
 
                 rows = box.select("table.timetable tr")
-                if len(rows) < 3: raise ValueError("予約データの行が不足しています")
+                if len(rows) < 3: raise ValueError("構造異常")
                 
                 status_list = []
                 for cell in rows[2].find_all("td"):
@@ -164,13 +175,13 @@ try:
                 
                 collected_data.append([area, station_name, plate, model, start_time_str, "".join(status_list)])
         except Exception as e:
-            print(f"!! 解析工程でのエラー(即時停止): {station_name} - {e}")
+            print(f"!! 解析失敗(即時停止): {station_name} - {e}")
             sys.exit(1)
         
         print(f"[{i+1}/{len(target_stations)}] {station_name} OK")
 
     # ==========================================================
-    # IV. 本格書き込み
+    # IV. 保存
     # ==========================================================
     if collected_data:
         print("\n[IV.データ保存] シートへ書き込み中...")
@@ -183,7 +194,6 @@ try:
             except gspread.WorksheetNotFound: ws_work = sh_prod.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
             ws_work.clear()
             ws_work.update([df_to_write.columns.values.tolist()] + df_to_write.values.tolist(), range_name='A1')
-            print(f"   -> {work_sheet_name} 更新完了")
 
 except Exception as e:
     print(f"\n!! 重大な実行エラー: {e}")
