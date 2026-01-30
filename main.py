@@ -70,9 +70,9 @@ def sync_session():
         driver.find_element(By.ID, "password").send_keys(Keys.RETURN)
         sleep(5)
         
-        # ★安定化の鍵: 一覧ページを完全に読み込み、セッションを確立させる
+        # ★安定化の鍵: 一覧ページを完全に読み込み、セッションを確定させる
         driver.get("https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStation.html")
-        sleep(4) 
+        sleep(5) 
         
         for cookie in driver.get_cookies():
             session.cookies.set(cookie['name'], cookie['value'])
@@ -85,7 +85,7 @@ def sync_session():
         })
         
         # クッションリクエスト: API側にも一度トップページを叩かせておく
-        session.get("https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStation.html", timeout=10)
+        session.get("https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStation.html", timeout=15)
         
         print("   -> セッション同期成功")
     except Exception as e:
@@ -130,7 +130,7 @@ try:
             
             if attempt < 3:
                 # 待機時間を段階的に増やす(バックオフ)
-                wait_time = 0.5 + (attempt * 0.3)
+                wait_time = 0.8 + (attempt * 0.4)
                 print(f"   [!] {station_name}: データ未完成。{wait_time}秒後にリトライ({attempt+1}/3)...")
                 sleep(wait_time)
         
