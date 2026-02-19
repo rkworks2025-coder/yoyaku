@@ -1,11 +1,13 @@
 # ==========================================================
-# 【GitHub Actions用】3エリア巡回システム (高速化版)
-# 改修内容: 再ログイン削除 + sleep最適化 + エリアフィルタリング対応
+# 【GitHub Actions用】3エリア巡回システム (高速化＆Discord通知版)
+# 改修内容: 再ログイン削除 + sleep最適化 + エリアフィルタリング対応 + Discord通知追加
 # ==========================================================
 import sys
 import os
 import pandas as pd
 import gspread
+import urllib.request
+import json
 from time import sleep
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -14,6 +16,22 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from bs4 import BeautifulSoup
+
+# --- Discord通知用設定 ---
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1474006170057441300/Emo5Ooe48jBUzMhzLrCBn85_3Td-ck3jYtXtVa2vdXWWyT2HxSuKghWchrG7gCsZhEqY"
+
+def send_discord_notification(message):
+    if not DISCORD_WEBHOOK_URL: return
+    data = {"content": message}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    req = urllib.request.Request(DISCORD_WEBHOOK_URL, data=json.dumps(data).encode(), headers=headers)
+    try:
+        urllib.request.urlopen(req)
+    except Exception as e:
+        print(f"Discord通知エラー: {e}")
 
 # 1. ログイン情報設定
 LOGIN_URL = "https://dailycheck.tc-extsys.jp/tcrappsweb/web/login/tawLogin.html"
@@ -171,7 +189,7 @@ try:
                         if "impossible" in classes: symbol = "s"
                         elif "vacant" in classes: symbol = "○"
                         else: symbol = "×"
-                        
+                    
                         try:
                             colspan = int(cell.get("colspan", 1))
                         except:
@@ -186,7 +204,6 @@ try:
                 collected_data.append([area, station_name, plate, model, start_time_str, "".join(status_list)])
             except Exception as e:
                 print(f"警告: 解析エラー {raw_car_text}: {e}")
-        # ★改修3: sleep(2)を削除
 
     # ==========================================================
     # III. 本番シートへの書き込み
@@ -216,12 +233,22 @@ try:
             ws_work.update(data_to_upload, range_name='A1')
             
             print(f"   -> '{work_sheet_name}' シート更新完了")
-        print(f"\n【完了】データ保存完了")
+        
+        # 正常完了時のDiscord通知
+        success_msg = f"✅ 【更新完了】 {TARGET_AREA.upper()} エリアの車両データ更新が完了しました！"
+        print(f"\n{success_msg}")
+        send_discord_notification(success_msg)
     else:
-        print("!! データなし")
+        # データが空だった時のDiscord通知
+        warn_msg = f"⚠️ 【データなし】 {TARGET_AREA.upper()} エリアの更新対象データがありませんでした。"
+        print(warn_msg)
+        send_discord_notification(warn_msg)
 
 except Exception as e:
-    print(f"\n!! 重大なエラー発生: {e}")
+    # エラーで途中停止した時のDiscord通知
+    error_msg = f"❌ 【重大なエラー】 {TARGET_AREA.upper()} エリアのスクレイピング中にエラーが発生しました:\n```{e}```"
+    print(f"\n{error_msg}")
+    send_discord_notification(error_msg)
 
 finally:
     # ==========================================================
