@@ -1,12 +1,14 @@
 # ==========================================================
-# 【GitHub Actions用】3エリア巡回システム (高速化版)
-# 改修内容: 再ログイン削除 + sleep最適化 + エリアフィルタリング対応 + inspectionlog動的除外
+# 【GitHub Actions用】3エリア巡回システム (高速化＆Discord通知＆動的除外版)
+# 改修内容: 再ログイン削除 + sleep最適化 + エリアフィルタリング対応 + inspectionlog動的除外 + Discord通知
 # ==========================================================
 import sys
 import os
 import pandas as pd
 import gspread
 import unicodedata
+import urllib.request
+import json
 from time import sleep
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -15,6 +17,22 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from bs4 import BeautifulSoup
+
+# --- Discord通知用設定 ---
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1474006170057441300/Emo5Ooe48jBUzMhzLrCBn85_3Td-ck3jYtXtVa2vdXWWyT2HxSuKghWchrG7gCsZhEqY"
+
+def send_discord_notification(message):
+    if not DISCORD_WEBHOOK_URL: return
+    data = {"content": message}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    req = urllib.request.Request(DISCORD_WEBHOOK_URL, data=json.dumps(data).encode(), headers=headers)
+    try:
+        urllib.request.urlopen(req)
+    except Exception as e:
+        print(f"Discord通知エラー: {e}")
 
 # 1. ログイン情報設定
 LOGIN_URL = "https://dailycheck.tc-extsys.jp/tcrappsweb/web/login/tawLogin.html"
@@ -133,8 +151,12 @@ for item in target_stations_raw:
 
 target_stations = final_target_stations
 print(f"-> 最終巡回対象: {len(target_stations)} カ所")
+
+# 対象ステーションが0件の場合の処理（Discord通知付き）
 if len(target_stations) == 0:
     print("-> 対象ステーションが0件のため終了します。")
+    warn_msg = f"⚠️ 【データなし】 {TARGET_AREA.upper()} エリアの更新対象データがありませんでした。"
+    send_discord_notification(warn_msg)
     sys.exit()
 
 # ==========================================================
@@ -280,12 +302,17 @@ try:
             ws_work.update(data_to_upload, range_name='A1')
             
             print(f"   -> '{work_sheet_name}' シート更新完了")
-        print(f"\n【完了】データ保存完了")
-    else:
-        print("!! データなし")
+            
+        # 正常完了時のDiscord通知
+        success_msg = f"✅ 【更新完了】 {TARGET_AREA.upper()} エリアの車両データ更新が完了しました！"
+        print(f"\n{success_msg}")
+        send_discord_notification(success_msg)
 
 except Exception as e:
-    print(f"\n!! 重大なエラー発生: {e}")
+    # エラーで途中停止した時のDiscord通知
+    error_msg = f"❌ 【重大なエラー】 {TARGET_AREA.upper()} エリアのスクレイピング中にエラーが発生しました:\n```{e}```"
+    print(f"\n{error_msg}")
+    send_discord_notification(error_msg)
 
 finally:
     # ==========================================================
