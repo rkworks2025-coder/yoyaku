@@ -1,13 +1,12 @@
 # ==========================================================
-# 【GitHub Actions用】3エリア巡回システム (高速化＆Discord通知版)
-# 改修内容: 再ログイン削除 + sleep最適化 + エリアフィルタリング対応 + Discord通知追加
+# 【GitHub Actions用】3エリア巡回システム (高速化版)
+# 改修内容: 再ログイン削除 + sleep最適化 + エリアフィルタリング対応 + inspectionlog動的除外
 # ==========================================================
 import sys
 import os
 import pandas as pd
 import gspread
-import urllib.request
-import json
+import unicodedata
 from time import sleep
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -16,22 +15,6 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from bs4 import BeautifulSoup
-
-# --- Discord通知用設定 ---
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1474006170057441300/Emo5Ooe48jBUzMhzLrCBn85_3Td-ck3jYtXtVa2vdXWWyT2HxSuKghWchrG7gCsZhEqY"
-
-def send_discord_notification(message):
-    if not DISCORD_WEBHOOK_URL: return
-    data = {"content": message}
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    }
-    req = urllib.request.Request(DISCORD_WEBHOOK_URL, data=json.dumps(data).encode(), headers=headers)
-    try:
-        urllib.request.urlopen(req)
-    except Exception as e:
-        print(f"Discord通知エラー: {e}")
 
 # 1. ログイン情報設定
 LOGIN_URL = "https://dailycheck.tc-extsys.jp/tcrappsweb/web/login/tawLogin.html"
@@ -42,6 +25,7 @@ PASSWORD = "Ccj-222223"
 # 2. 設定
 PRODUCTION_SHEET_URL = "https://docs.google.com/spreadsheets/d/13cQngK_Xx38VU67yLS-iTHyOZgsACZdxM34l-Jq_U9A/edit"
 CSV_FILE_NAME = "station_code_map.csv"
+INSPECTION_SHEET_URL = "https://docs.google.com/spreadsheets/d/11XglLANtnG7bCxYjLRMGoZY25wspjHsGR3IG2ZyRITs/edit"
 
 # 3. Google認証
 SERVICE_ACCOUNT_KEY_FILE = "service_account.json"
@@ -87,9 +71,71 @@ elif TARGET_AREA == 'tama':
 else:
     print(f"-> エリアフィルタ: 全エリア")
 
-target_stations = df_active.drop_duplicates(subset=['stationCd']).to_dict('records')
-print(f"-> 巡回対象: {len(target_stations)} カ所")
-if len(target_stations) == 0: sys.exit()
+target_stations_raw = df_active.drop_duplicates(subset=['stationCd']).to_dict('records')
+
+# ==========================================================
+# ★新機能: inspectionlogを用いた動的フィルタリング
+# ==========================================================
+print(f"\n[動的フィルタリング] 'inspectionlog' の最新ステータスを取得・突合します...")
+
+try:
+    inspection_sh_key = INSPECTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
+    sh_inspection = gc.open_by_key(inspection_sh_key)
+    ws_inspection = sh_inspection.worksheet("inspectionlog")
+    inspection_values = ws_inspection.get_all_values()
+except Exception as e:
+    print(f"!! エラー: inspectionlogの取得に失敗しました。URLやシート名、権限を確認してください。")
+    raise e  # エラーを隠蔽せず異常終了させる
+
+def normalize_station_name(name):
+    if pd.isna(name) or name is None:
+        return ""
+    name = str(name)
+    name = unicodedata.normalize('NFKC', name)
+    name = name.replace(' ', '').replace('　', '').lower()
+    return name
+
+inspection_status_map = {}
+if len(inspection_values) > 1:
+    for row in inspection_values[1:]: # ヘッダー行をスキップ
+        if len(row) > 5: # B列(1)とF列(5)が存在することを確認
+            raw_station = row[1] # B列: station
+            raw_status = row[5]  # F列: status
+            norm_station = normalize_station_name(raw_station)
+            if norm_station:
+                if norm_station not in inspection_status_map:
+                    inspection_status_map[norm_station] = []
+                norm_status = str(raw_status).strip().lower()
+                inspection_status_map[norm_station].append(norm_status)
+
+final_target_stations = []
+skip_statuses = ['checked', 'unnecessary', '7days_rule']
+
+for item in target_stations_raw:
+    raw_station = item.get('station', '')
+    norm_station = normalize_station_name(raw_station)
+    
+    if not norm_station:
+        continue
+        
+    if norm_station not in inspection_status_map:
+        # 表記揺れを吸収しても一致しない、または登録漏れの場合は厳格にエラーで止める
+        raise ValueError(f"エラー: CSVのステーション '{raw_station}' が inspectionlog に存在しません。表記揺れか登録漏れの可能性があります。")
+        
+    statuses = inspection_status_map[norm_station]
+    # ステーション内の「すべて」の車両がskip_statusesに含まれているか判定
+    all_skipped = all((s in skip_statuses) for s in statuses)
+    
+    if all_skipped:
+        print(f"   -> 全車両巡回済(または不要)のためスキップ: {raw_station}")
+    else:
+        final_target_stations.append(item)
+
+target_stations = final_target_stations
+print(f"-> 最終巡回対象: {len(target_stations)} カ所")
+if len(target_stations) == 0:
+    print("-> 対象ステーションが0件のため終了します。")
+    sys.exit()
 
 # ==========================================================
 # ドライバ設定 & 変数初期化
@@ -189,7 +235,7 @@ try:
                         if "impossible" in classes: symbol = "s"
                         elif "vacant" in classes: symbol = "○"
                         else: symbol = "×"
-                    
+                        
                         try:
                             colspan = int(cell.get("colspan", 1))
                         except:
@@ -204,6 +250,7 @@ try:
                 collected_data.append([area, station_name, plate, model, start_time_str, "".join(status_list)])
             except Exception as e:
                 print(f"警告: 解析エラー {raw_car_text}: {e}")
+        # ★改修3: sleep(2)を削除
 
     # ==========================================================
     # III. 本番シートへの書き込み
@@ -233,22 +280,12 @@ try:
             ws_work.update(data_to_upload, range_name='A1')
             
             print(f"   -> '{work_sheet_name}' シート更新完了")
-        
-        # 正常完了時のDiscord通知
-        success_msg = f"✅ 【更新完了】 {TARGET_AREA.upper()} エリアの車両データ更新が完了しました！"
-        print(f"\n{success_msg}")
-        send_discord_notification(success_msg)
+        print(f"\n【完了】データ保存完了")
     else:
-        # データが空だった時のDiscord通知
-        warn_msg = f"⚠️ 【データなし】 {TARGET_AREA.upper()} エリアの更新対象データがありませんでした。"
-        print(warn_msg)
-        send_discord_notification(warn_msg)
+        print("!! データなし")
 
 except Exception as e:
-    # エラーで途中停止した時のDiscord通知
-    error_msg = f"❌ 【重大なエラー】 {TARGET_AREA.upper()} エリアのスクレイピング中にエラーが発生しました:\n```{e}```"
-    print(f"\n{error_msg}")
-    send_discord_notification(error_msg)
+    print(f"\n!! 重大なエラー発生: {e}")
 
 finally:
     # ==========================================================
