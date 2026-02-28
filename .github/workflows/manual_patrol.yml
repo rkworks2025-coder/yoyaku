@@ -12,6 +12,7 @@ on:
           - all
           - kanagawa
           - tama
+          - force_all
 
 jobs:
   run-scraper:
