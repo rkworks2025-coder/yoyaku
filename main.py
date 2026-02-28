@@ -1,6 +1,6 @@
 # ==========================================================
 # 【GitHub Actions用】3エリア巡回システム (高速化＆Discord通知＆動的除外版)
-# 改修内容: force_allモード対応（全件取得ロジック追加）、シートURL修正
+# 改修内容: force_allモード対応（全件取得ロジック追加）
 # ==========================================================
 import sys
 import os
@@ -38,7 +38,6 @@ TARGET_AREA = os.environ.get("TARGET_AREA", "all")
 # ==========================================================
 # I. 設定・スプレッドシート準備
 # ==========================================================
-# ★修正: エラー原因だったURLを実体マップ記載の正しい CarData_Ryu に変更
 PRODUCTION_SHEET_URL = "https://docs.google.com/spreadsheets/d/13cQngK_Xx38VU67yLS-iTHyOZgsACZdxM34l-Jq_U9A/edit"
 WORK_SHEET_ID = "11XglLANtnG7bCxYjLRMGoZY25wspjHsGR3IG2ZyRITs" # 業務用SS (inspectionlog)
 STATION_CSV_URL = "https://raw.githubusercontent.com/rkworks2025-coder/yoyaku/main/target_stations.csv"
@@ -52,21 +51,14 @@ sh_prod = gc.open_by_url(PRODUCTION_SHEET_URL)
 sh_work = gc.open_by_key(WORK_SHEET_ID)
 
 # ステータス更新用シート (SystemStatus)
-try:
-    ws_status = sh_prod.worksheet("SystemStatus")
-except:
-    ws_status = sh_prod.add_worksheet(title="SystemStatus", rows=5, cols=5)
+ws_status = sh_prod.get_worksheet(0)
 
 def update_status(current, total):
     ws_status.update_acell('B1', current)
     ws_status.update_acell('C1', total)
 
 # --- 1. inspectionlogの読み込み (除外リスト作成) ---
-try:
-    ws_log = sh_work.worksheet("inspectionlog")
-except:
-    ws_log = sh_work.sheet1
-
+ws_log = sh_work.sheet1 # inspectionlog
 log_data = ws_log.get_all_values()
 df_log = pd.DataFrame(log_data[1:], columns=log_data[0])
 
