@@ -38,7 +38,7 @@ def send_discord_notification(message):
 LOGIN_URL = "https://dailycheck.tc-extsys.jp/tcrappsweb/web/login/tawLogin.html"
 USER_ID_1 = "0030"
 USER_ID_2 = "927583"
-PASSWORD = "Ccj-222223"
+PASSWORD = "Ccj-322222"
 
 # 2. 設定
 PRODUCTION_SHEET_URL = "https://docs.google.com/spreadsheets/d/13cQngK_Xx38VU67yLS-iTHyOZgsACZdxM34l-Jq_U9A/edit"
@@ -350,3 +350,4 @@ finally:
         
     except Exception as e:
         print(f"!! 警告: ステータスのリセットに失敗しました: {e}")
+
