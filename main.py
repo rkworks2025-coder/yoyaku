@@ -350,3 +350,4 @@ finally:
         
     except Exception as e:
         print(f"!! 警告: ステータスのリセットに失敗しました: {e}")
+
