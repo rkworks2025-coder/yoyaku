@@ -259,32 +259,43 @@ try:
                 table = box.find("table", class_="timetable")
                 rows = table.find_all("tr")
                 status_list = []
-                
-                # --- ★修正箇所: タイムラインのデータ行を動的に探す ---
                 data_cells = []
-                for idx, r in enumerate(rows):
-                    if r.find("td", class_="timeline"):
-                        if len(rows) > idx + 2:  # ★1段下(idx+1)ではなく、2段下(idx+2)を読むように修正
-                            data_cells = rows[idx + 2].find_all("td")
-                        break
                 
-                if not data_cells and len(rows) >= 3:
-                    data_cells = rows[2].find_all("td")
+                # --- ★修正箇所: タイムラインのデータ行を中身で探す ---
+                for r in rows:
+                    cells = r.find_all("td")
+                    if not cells: continue
+                    
+                    # その行が「時間の行(timeline)」や「空白の行(empty)」でないか確認
+                    is_timeline_header = any("timeline" in c.get("class", []) for c in cells)
+                    is_empty_spacer = any("empty" in c.get("class", []) for c in cells)
+                    
+                    # どちらでもなく、td要素があるなら、それがデータの行の可能性が高い
+                    if not is_timeline_header and not is_empty_spacer:
+                        # 念のため、データを示すクラス(vacant, full, impossible, others等)が含まれるか確認
+                        has_data_class = False
+                        for c in cells:
+                            cls = c.get("class", [])
+                            if any(x in cls for x in ["vacant", "full", "impossible", "others"]):
+                                has_data_class = True
+                                break
+                                
+                        if has_data_class:
+                            # 連続するデータ行を確定
+                            data_cells = cells
+                            break
 
                 if data_cells:
                     for cell in data_cells:
                         classes = cell.get("class", [])
                         
-                        # --- ★修正箇所: 空き判定を厳格化（ホワイトリスト方式） ---
-                        if "impossible" in classes:
+                        # --- ★修正箇所: シンプルな単語ベースの翻訳 ---
+                        if "vacant" in classes:
+                            symbol = "○"
+                        elif "impossible" in classes:
                             symbol = "s"
-                        elif "vacant" in classes:
-                            other_classes = [c for c in classes if c != "vacant"]
-                            if len(other_classes) == 0:
-                                symbol = "○"
-                            else:
-                                symbol = "×"
                         else:
+                            # full, others や 黄色など上記以外はすべて「×」
                             symbol = "×"
                         
                         try:
