@@ -264,8 +264,8 @@ try:
                 data_cells = []
                 for idx, r in enumerate(rows):
                     if r.find("td", class_="timeline"):
-                        if len(rows) > idx + 1:
-                            data_cells = rows[idx + 1].find_all("td")
+                        if len(rows) > idx + 2:  # ★1段下(idx+1)ではなく、2段下(idx+2)を読むように修正
+                            data_cells = rows[idx + 2].find_all("td")
                         break
                 
                 if not data_cells and len(rows) >= 3:
