@@ -109,7 +109,6 @@ else:
         inspection_sh_key = INSPECTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
         sh_inspection = gc.open_by_key(inspection_sh_key)
         ws_inspection = sh_inspection.worksheet("inspectionlog")
-     
         inspection_values = ws_inspection.get_all_values()
     except Exception as e:
         print(f"!! エラー: inspectionlogの取得に失敗しました。URLやシート名、権限を確認してください。")
@@ -128,13 +127,11 @@ else:
         for row in inspection_values[1:]: # ヘッダー行をスキップ
             if len(row) > 5: # B列(1)とF列(5)が存在することを確認
                 raw_station = row[1] # B列: station
-     
                 raw_status = row[5]  # F列: status
                 norm_station = normalize_station_name(raw_station)
                 if norm_station:
                     if norm_station not in inspection_status_map:
                         inspection_status_map[norm_station] = []
-                  
                     norm_status = str(raw_status).strip().lower()
                     inspection_status_map[norm_station].append(norm_status)
 
@@ -147,11 +144,11 @@ else:
         
         if not norm_station:
             continue
-            
+        
         if norm_station not in inspection_status_map:
             # 表記揺れを吸収しても一致しない、または登録漏れの場合は厳格にエラーで止める
             raise ValueError(f"エラー: CSVのステーション '{raw_station}' が inspectionlog に存在しません。表記揺れか登録漏れの可能性があります。")
-     
+        
         statuses = inspection_status_map[norm_station]
         # ステーション内の「すべて」の車両がskip_statusesに含まれているか判定
         all_skipped = all((s in skip_statuses) for s in statuses)
@@ -168,7 +165,7 @@ print(f"-> 最終巡回対象: {len(target_stations)} カ所")
 # 対象ステーションが0件の場合の処理（Discord通知付き）
 if len(target_stations) == 0:
     print("-> 対象ステーションが0件のため終了します。")
-    warn_msg = f"⚠️ 【データなし】 {TARGET_AREA.upper()} エリアの更新対象データがありませんでした。"
+    warn_msg = f"⚠️ 【データなし】 {TARGET_AREA.upper()} エリアの更新対象データがありません。"
     send_discord_notification(warn_msg)
     sys.exit()
 
@@ -238,14 +235,14 @@ try:
         try:
             table = soup.find("table", class_="timetable")
             rows = table.find_all("tr")
-            if len(rows) >= 2:
-                hour_row = rows[1]
-    
-                first_hour_cell = hour_row.find("td", class_="timeline")
+            # --- ★修正箇所: 時間行を動的に探す ---
+            for r in rows:
+                first_hour_cell = r.find("td", class_="timeline")
                 if first_hour_cell:
                     raw_hour = first_hour_cell.get_text(strip=True)
                     if raw_hour.isdigit(): start_time_str = f"{raw_hour}:00"
                     else: start_time_str = raw_hour
+                    break
         except: pass
 
         for box in car_boxes:
@@ -263,15 +260,33 @@ try:
                 rows = table.find_all("tr")
                 status_list = []
                 
-                if len(rows) >= 3:
+                # --- ★修正箇所: タイムラインのデータ行を動的に探す ---
+                data_cells = []
+                for idx, r in enumerate(rows):
+                    if r.find("td", class_="timeline"):
+                        if len(rows) > idx + 1:
+                            data_cells = rows[idx + 1].find_all("td")
+                        break
+                
+                if not data_cells and len(rows) >= 3:
                     data_cells = rows[2].find_all("td")
+
+                if data_cells:
                     for cell in data_cells:
                         classes = cell.get("class", [])
                         
-                        if "impossible" in classes: symbol = "s"
-                        elif "vacant" in classes: symbol = "○"
-                        else: symbol = "×"
-                    
+                        # --- ★修正箇所: 空き判定を厳格化（ホワイトリスト方式） ---
+                        if "impossible" in classes:
+                            symbol = "s"
+                        elif "vacant" in classes:
+                            other_classes = [c for c in classes if c != "vacant"]
+                            if len(other_classes) == 0:
+                                symbol = "○"
+                            else:
+                                symbol = "×"
+                        else:
+                            symbol = "×"
+                        
                         try:
                             colspan = int(cell.get("colspan", 1))
                         except:
@@ -279,7 +294,7 @@ try:
                         
                         for _ in range(colspan):
                             status_list.append(symbol)
-        
+                
                 if len(status_list) < 288:
                     status_list += ["×"] * (288 - len(status_list))
 
@@ -300,7 +315,6 @@ try:
         unique_areas = df_output['city'].unique()
         for area in unique_areas:
             df_area = df_output[df_output['city'] == area].copy()
-          
             if df_area.empty: continue
             
             area_name = str(area).replace('市', '').strip()
@@ -350,4 +364,3 @@ finally:
         
     except Exception as e:
         print(f"!! 警告: ステータスのリセットに失敗しました: {e}")
-
