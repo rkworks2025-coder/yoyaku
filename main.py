@@ -10,6 +10,7 @@ import unicodedata
 import urllib.request
 import json
 from time import sleep
+from datetime import datetime, timezone, timedelta
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -235,13 +236,22 @@ try:
         try:
             table = soup.find("table", class_="timetable")
             rows = table.find_all("tr")
-            # --- ★修正箇所: 時間行を動的に探す ---
+            # --- ★修正箇所: 時間行を動的に探す(日付セット方式) ---
             for r in rows:
                 first_hour_cell = r.find("td", class_="timeline")
                 if first_hour_cell:
                     raw_hour = first_hour_cell.get_text(strip=True)
-                    if raw_hour.isdigit(): start_time_str = f"{raw_hour}:00"
-                    else: start_time_str = raw_hour
+                    if raw_hour.isdigit(): 
+                        raw_hour_int = int(raw_hour)
+                        now_jst = datetime.now(timezone(timedelta(hours=+9), 'JST'))
+                        # 0時またぎ対策（現在01:00で、タイムライン開始が23:00の場合など）
+                        if raw_hour_int > now_jst.hour + 12:
+                            target_date = now_jst - timedelta(days=1)
+                        else:
+                            target_date = now_jst
+                        start_time_str = f"{target_date.strftime('%Y-%m-%d')} {raw_hour_int:02d}:00"
+                    else: 
+                        start_time_str = raw_hour
                     break
         except: pass
 
