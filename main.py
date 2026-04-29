@@ -159,7 +159,7 @@ try:
 
     # II. データ収集
     for i, item in enumerate(target_stations):
-        # 20件ごとに進捗とタイムスタンプ(D1)を更新
+        # 進捗とタイムスタンプ(D1)を更新
         if (i > 0) and (i % 20 == 0):
             try:
                 ws_status = sh_prod.worksheet("SystemStatus")
