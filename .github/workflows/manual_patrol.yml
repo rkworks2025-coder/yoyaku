@@ -31,13 +31,13 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Create Service Account Key
-        run: |
-          echo '${{ secrets.GCP_SA_KEY }}' > service_account.json
+      # ※新しいコードは環境変数から直接鍵を読み込むため、
+      # この「ファイルの作成ステップ」は不要になりますが、残しておいても害はありません。
 
       - name: Run Patrol Script
         env:
+          # --- ここが重要：Pythonに合鍵と情報を渡す設定 ---
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           TARGET_AREA: ${{ github.event.inputs.target_area }}
-          # ★ここを追記: ログのリアルタイム表示を有効にする設定
           PYTHONUNBUFFERED: "1"
         run: python main.py
