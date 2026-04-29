@@ -20,10 +20,10 @@ jobs:
  
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 # v3からv4に更新 (警告解消)
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # v4からv5に更新 (警告解消)
         with:
           python-version: '3.12'
 
@@ -31,13 +31,9 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      # ※新しいコードは環境変数から直接鍵を読み込むため、
-      # この「ファイルの作成ステップ」は不要になりますが、残しておいても害はありません。
-
       - name: Run Patrol Script
         env:
-          # --- ここが重要：Pythonに合鍵と情報を渡す設定 ---
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           TARGET_AREA: ${{ github.event.inputs.target_area }}
           PYTHONUNBUFFERED: "1"
-        run: python main.py
+        run: python yoyaku_main20260429.py # ファイル名をアップロードされたものに修正
