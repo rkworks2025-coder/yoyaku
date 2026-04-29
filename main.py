@@ -1,6 +1,6 @@
 # ==========================================================
 # 【GitHub Actions用】3エリア巡回システム (JKS本体同時書き込み版)
-# 改修内容: CarData_Ryu と JKS本体(16HYziQ...) への同時同期機能を追加
+# 改修内容: サービスアカウント(JSON鍵)対応 & 新しいSSへの移設版
 # ==========================================================
 import sys
 import os
@@ -18,6 +18,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from bs4 import BeautifulSoup
+from google.oauth2.service_account import Credentials
 
 # --- Discord通知用設定 ---
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1474006170057441300/Emo5Ooe48jBUzMhzLrCBn85_3Td-ck3jYtXtVa2vdXWWyT2HxSuKghWchrG7gCsZhEqY"
@@ -38,21 +39,31 @@ USER_ID_1 = "0030"
 USER_ID_2 = "927583"
 PASSWORD = "Ccj-322222"
 
-# 2. 設定
-PRODUCTION_SHEET_URL = "https://docs.google.com/spreadsheets/d/13cQngK_Xx38VU67yLS-iTHyOZgsACZdxM34l-Jq_U9A/edit"
-# ★JKS本体スプレッドシートID
+# 2. 設定 (新しいスプレッドシートID)
+# ★「予約管理メイン」のID
+PRODUCTION_SHEET_ID = "1LCyj16nsRYBk5cTpx2Sb75qmtm3YGKNEIdeyUvZzQQI"
+# ★JKS本体スプレッドシートID (既存のまま)
 JKS_SHEET_ID = "16HYziQ5now1IATZJU3wZhTE08S_3B8xVP9MbfceHONE"
 
 CSV_FILE_NAME = "station_code_map.csv"
 INSPECTION_SHEET_URL = "https://docs.google.com/spreadsheets/d/11XglLANtnG7bCxYjLRMGoZY25wspjHsGR3IG2ZyRITs/edit"
 
-# 3. Google認証
-SERVICE_ACCOUNT_KEY_FILE = "service_account.json"
-if not os.path.exists(SERVICE_ACCOUNT_KEY_FILE):
-    print("!! エラー: 認証キーファイルが見つかりません。")
-    sys.exit(1)
+# 3. Google認証 (GitHub SecretsのJSON鍵を使用)
+def get_gspread_client():
+    key_json = os.environ.get('GCP_SA_KEY')
+    if not key_json:
+        print("!! エラー: GitHub Secrets 'GCP_SA_KEY' が設定されていません。")
+        sys.exit(1)
+    
+    key_data = json.loads(key_json)
+    scopes = [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive'
+    ]
+    creds = Credentials.from_service_account_info(key_data, scopes=scopes)
+    return gspread.authorize(creds)
 
-gc = gspread.service_account(filename=SERVICE_ACCOUNT_KEY_FILE)
+gc = get_gspread_client()
 
 # エリアフィルタリング設定
 TARGET_AREA = os.environ.get('TARGET_AREA', 'all').lower()
@@ -114,7 +125,8 @@ else:
         norm_station = normalize_station_name(item.get('station', ''))
         if not norm_station: continue
         if norm_station not in inspection_status_map:
-            raise ValueError(f"エラー: ステーション '{item.get('station')}' が inspectionlog に存在しません。")
+            print(f"警告: ステーション '{item.get('station')}' が inspectionlog に存在しません。スキップします。")
+            continue
         if not all((s in skip_statuses) for s in inspection_status_map[norm_station]):
             final_target_stations.append(item)
     target_stations = final_target_stations
@@ -137,9 +149,7 @@ try:
     # ==========================================================
     # II. データ収集
     # ==========================================================
-    prod_sh_key = PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
-    sh_prod = gc.open_by_key(prod_sh_key)
-    # ★JKS本体もオープンしておく
+    sh_prod = gc.open_by_key(PRODUCTION_SHEET_ID)
     sh_jks = gc.open_by_key(JKS_SHEET_ID)
 
     driver.get(LOGIN_URL)
@@ -207,7 +217,7 @@ try:
             except: pass
 
     # ==========================================================
-    # III. 二重書き込み (CarData_Ryu & JKS本体)
+    # III. 二重書き込み (予約管理メイン & JKS本体)
     # ==========================================================
     if collected_data:
         print("\n[III.データ保存] 両シートへ書き込みます...")
@@ -220,21 +230,20 @@ try:
             df_to_write = df_area.drop(columns=['city'])
             data_to_upload = [df_to_write.columns.values.tolist()] + df_to_write.values.tolist()
 
-            # 1. CarData_Ryu への書き込み
+            # 1. 予約管理メイン (旧CarData_Ryu) への書き込み
             try:
                 try: ws_prod = sh_prod.worksheet(work_sheet_name)
                 except gspread.WorksheetNotFound: ws_prod = sh_prod.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
                 ws_prod.clear()
                 ws_prod.update(data_to_upload, range_name='A1')
-                print(f"   -> CarData_Ryu: '{work_sheet_name}' 更新完了")
+                print(f"   -> 予約管理メイン: '{work_sheet_name}' 更新完了")
             except Exception as e:
-                raise Exception(f"CarData_Ryuへの書き込みに失敗しました: {e}")
+                raise Exception(f"予約管理メインへの書き込みに失敗しました: {e}")
 
-            # 2. JKS本体 への書き込み (ID: 16HYziQ...)
+            # 2. JKS本体 への書き込み
             try:
                 try: ws_jks = sh_jks.worksheet(work_sheet_name)
                 except gspread.WorksheetNotFound: 
-                    # 1ミリの不整合も許さないため、JKS側にシートがない場合はエラーで停止
                     raise Exception(f"JKS本体側に '{work_sheet_name}' タブが見つかりません。")
                 ws_jks.clear()
                 ws_jks.update(data_to_upload, range_name='A1')
@@ -253,7 +262,7 @@ except Exception as e:
 finally:
     if 'driver' in locals(): driver.quit()
     try:
-        sh_prod_fin = gc.open_by_key(prod_sh_key)
+        sh_prod_fin = gc.open_by_key(PRODUCTION_SHEET_ID)
         ws_status_fin = sh_prod_fin.worksheet("SystemStatus")
         ws_status_fin.clear()
     except: pass
