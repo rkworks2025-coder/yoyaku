@@ -1,6 +1,6 @@
 # ==========================================================
 # 【GitHub Actions用】3エリア巡回システム (JKS本体同時書き込み版)
-# 改修内容: 書き込み先ID修正 & SystemStatus D1(timestamp)対応版
+# 改修内容: 書き込み先ID修正(巡回管理メイン) & SystemStatus D1(timestamp)対応
 # ==========================================================
 import sys
 import os
@@ -39,8 +39,8 @@ USER_ID_1 = "0030"
 USER_ID_2 = "927583"
 PASSWORD = "Ccj-322222"
 
-# 2. 設定 (正しいスプレッドシートIDへ修正)
-# ★「予約管理メイン」のID (11XglLANtnG7bCxYjLRMGoZY25wspjHsGR3IG2ZyRITs)
+# 2. 設定 (IDを 11Xgl... 巡回管理メインへ修正)
+# ★「巡回管理メイン」のID
 PRODUCTION_SHEET_ID = "11XglLANtnG7bCxYjLRMGoZY25wspjHsGR3IG2ZyRITs"
 # ★JKS本体スプレッドシートID
 JKS_SHEET_ID = "16HYziQ5now1IATZJU3wZhTE08S_3B8xVP9MbfceHONE"
@@ -56,7 +56,10 @@ def get_gspread_client():
         sys.exit(1)
     
     key_data = json.loads(key_json)
-    scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+    scopes = [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive'
+    ]
     creds = Credentials.from_service_account_info(key_data, scopes=scopes)
     return gspread.authorize(creds)
 
@@ -65,10 +68,6 @@ gc = get_gspread_client()
 # エリアフィルタリング設定
 TARGET_AREA = os.environ.get('TARGET_AREA', 'all').lower()
 print(f"\n[エリア指定] {TARGET_AREA}")
-
-# --- 日本時刻取得用 ---
-def get_now_jst_str():
-    return datetime.now(timezone(timedelta(hours=+9))).strftime('%Y/%m/%d %H:%M:%S')
 
 # ==========================================================
 # I. リスト読み込み
@@ -144,6 +143,9 @@ driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), opti
 collected_data = []
 
 try:
+    # ==========================================================
+    # II. データ収集
+    # ==========================================================
     sh_prod = gc.open_by_key(PRODUCTION_SHEET_ID)
     sh_jks = gc.open_by_key(JKS_SHEET_ID)
 
@@ -157,13 +159,13 @@ try:
     driver.get("https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStation.html")
     sleep(2)
 
-    # II. データ収集
     for i, item in enumerate(target_stations):
-        # 進捗とタイムスタンプ(D1)を更新
         if (i > 0) and (i % 20 == 0):
             try:
                 ws_status = sh_prod.worksheet("SystemStatus")
-                ws_status.update([[ "progress", i, len(target_stations), get_now_jst_str() ]], "A1:D1")
+                # D1セルにtimestampを書き込む（アプリの更新検知用）
+                now_jst = datetime.now(timezone(timedelta(hours=+9))).strftime('%Y/%m/%d %H:%M:%S')
+                ws_status.update([[ "progress", i, len(target_stations), now_jst ]], "A1")
             except: pass
 
         station_name = item.get('station', '不明')
@@ -177,6 +179,7 @@ try:
         soup = BeautifulSoup(driver.page_source, "lxml")
         car_boxes = soup.find_all("div", class_="car-list-box")
         
+        # タイムライン開始時刻取得
         start_time_str = "00:00"
         try:
             table = soup.find("table", class_="timetable")
@@ -194,6 +197,7 @@ try:
             try:
                 title = box.find("div", class_="car-list-title-area").get_text(strip=True)
                 plate, model = title.split(" / ") if " / " in title else (title, "")
+                
                 status_list = []
                 data_cells = []
                 for r in box.find("table", class_="timetable").find_all("tr"):
@@ -201,17 +205,23 @@ try:
                     if cells and any(x in (cells[0].get("class", [])) for x in ["vacant", "full", "impossible", "others"]):
                         data_cells = cells
                         break
+                
                 if data_cells:
                     for cell in data_cells:
                         sym = "○" if "vacant" in cell.get("class", []) else ("s" if "impossible" in cell.get("class", []) else "×")
                         for _ in range(int(cell.get("colspan", 1))): status_list.append(sym)
+                
                 if len(status_list) < 288: status_list += ["×"] * (288 - len(status_list))
                 collected_data.append([city, station_name, plate.strip(), model.strip(), start_time_str, "".join(status_list)])
             except: pass
 
-    # III. 二重書き込み
+    # ==========================================================
+    # III. 二重書き込み (巡回管理メイン & JKS本体)
+    # ==========================================================
     if collected_data:
+        print("\n[III.データ保存] 両シートへ書き込みます...")
         df_output = pd.DataFrame(collected_data, columns=['city', 'station', 'plate', 'model', 'getTime', 'rsvData'])
+
         for area in df_output['city'].unique():
             df_area = df_output[df_output['city'] == area].copy()
             area_name = str(area).replace('市', '').strip()
@@ -219,26 +229,38 @@ try:
             df_to_write = df_area.drop(columns=['city'])
             data_to_upload = [df_to_write.columns.values.tolist()] + df_to_write.values.tolist()
 
-            # 1. 予約管理メイン
-            ws_prod = sh_prod.worksheet(work_sheet_name)
-            ws_prod.clear()
-            ws_prod.update(data_to_upload, range_name='A1')
+            # 1. 巡回管理メイン (11Xgl...) への書き込み
+            try:
+                ws_prod = sh_prod.worksheet(work_sheet_name)
+                ws_prod.clear()
+                ws_prod.update(data_to_upload, 'A1')
+                print(f"   -> 巡回管理メイン: '{work_sheet_name}' 更新完了")
+            except Exception as e:
+                raise Exception(f"巡回管理メインへの書き込みに失敗しました: {e}")
 
-            # 2. JKS本体
-            ws_jks = sh_jks.worksheet(work_sheet_name)
-            ws_jks.clear()
-            ws_jks.update(data_to_upload, range_name='A1')
+            # 2. JKS本体 への書き込み
+            try:
+                ws_jks = sh_jks.worksheet(work_sheet_name)
+                ws_jks.clear()
+                ws_jks.update(data_to_upload, 'A1')
+                print(f"   -> JKS本体: '{work_sheet_name}' 更新完了")
+            except Exception as e:
+                raise Exception(f"JKS本体への同時書き込みに失敗しました: {e}")
 
-        send_discord_notification(f"✅ {TARGET_AREA.upper()} 更新完了！")
+        status_prefix = "【全件強制更新】" if TARGET_AREA == 'force_all' else "【更新完了】"
+        send_discord_notification(f"✅ {status_prefix} {TARGET_AREA.upper()} 両シートの更新が完了しました！")
 
 except Exception as e:
-    send_discord_notification(f"❌ 重大エラー: {e}")
+    send_discord_notification(f"❌ 【重大なエラー】 {TARGET_AREA.upper()} スクレイピング停止:\n```{e}```")
+    print(f"\nエラー発生のため停止: {e}")
     sys.exit(1)
 
 finally:
     if 'driver' in locals(): driver.quit()
     try:
-        # 完了時にD1(timestamp)を最終更新し、進捗をリセット
-        ws_status_fin = sh_prod.worksheet("SystemStatus")
-        ws_status_fin.update([[ "", "", "", get_now_jst_str() ]], "A1:D1")
+        sh_prod_fin = gc.open_by_key(PRODUCTION_SHEET_ID)
+        ws_status_fin = sh_prod_fin.worksheet("SystemStatus")
+        # 完了時にD1セルを最終更新時刻で上書きし、進捗表示をクリア
+        now_jst_final = datetime.now(timezone(timedelta(hours=+9))).strftime('%Y/%m/%d %H:%M:%S')
+        ws_status_fin.update([[ "", "", "", now_jst_final ]], "A1")
     except: pass
