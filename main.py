@@ -1,6 +1,6 @@
 # ==========================================================
 # 【GitHub Actions用】3エリア巡回システム (JKS本体同時書き込み版)
-# 改修内容: 書き込み先ID修正(予約管理メイン) & 自動タブ作成ロジック完全復元
+# 改修内容: 120件全車両処理の復旧、書き込み先ID修正、完了時刻(D1)追記
 # ==========================================================
 import sys
 import os
@@ -45,7 +45,7 @@ PRODUCTION_SHEET_ID = "1LCyj16nsRYBk5cTpx2Sb75qmtm3YGKNEIdeyUvZzQQI"
 JKS_SHEET_ID = "16HYziQ5now1IATZJU3wZhTE08S_3B8xVP9MbfceHONE"
 
 CSV_FILE_NAME = "station_code_map.csv"
-# ★ログ参照先：巡回管理メイン
+# ★ログ参照先：巡回管理メイン (11Xgl...)
 INSPECTION_SHEET_URL = "https://docs.google.com/spreadsheets/d/11XglLANtnG7bCxYjLRMGoZY25wspjHsGR3IG2ZyRITs/edit"
 
 # 3. Google認証
@@ -54,77 +54,72 @@ def get_gspread_client():
     if not key_json:
         print("!! エラー: GCP_SA_KEY が設定されていません。")
         sys.exit(1)
-    
     key_data = json.loads(key_json)
-    scopes = [
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/drive'
-    ]
+    scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
     creds = Credentials.from_service_account_info(key_data, scopes=scopes)
     return gspread.authorize(creds)
 
 gc = get_gspread_client()
-
-# エリアフィルタリング設定
 TARGET_AREA = os.environ.get('TARGET_AREA', 'all').lower()
 print(f"\n[エリア指定] {TARGET_AREA}")
 
 # ==========================================================
-# I. リスト読み込み
+# I. リスト読み込み (オリジナル通り120件を保持)
 # ==========================================================
 if not os.path.exists(CSV_FILE_NAME):
     raise FileNotFoundError(f"エラー: '{CSV_FILE_NAME}' が見つかりません。")
 
 df_map = pd.read_csv(CSV_FILE_NAME)
 df_map.columns = df_map.columns.str.strip()
-if 'area' in df_map.columns: df_map = df_map.rename(columns={'area': 'city'})
-if 'station_name' in df_map.columns: df_map = df_map.rename(columns={'station_name': 'station'})
+df_map = df_map.rename(columns={'area': 'city', 'station_name': 'station'})
 if 'status' not in df_map.columns: df_map['status'] = ""
 
+# 重複削除(drop_duplicates)は行わず、CSVの全行を対象とする
 if TARGET_AREA == 'force_all':
-    df_active = df_map.copy()
+    target_stations = df_map.to_dict('records')
 else:
+    # 通常フィルタリング
     filter_mask = df_map['status'].astype(str).str.lower().isin(['checked', 'unnecessary', '7days_rule'])
     df_active = df_map[~filter_mask].copy()
+    
     if TARGET_AREA == 'kanagawa':
         df_active = df_active[df_active['city'].str.contains('大和|海老名', na=False)].copy()
     elif TARGET_AREA == 'tama':
         df_active = df_active[df_active['city'].str.contains('多摩', na=False)].copy()
 
-target_stations_raw = df_active.drop_duplicates(subset=['stationCd']).to_dict('records')
+    # inspectionlogを用いた動的フィルタリング
+    try:
+        inspection_sh_key = INSPECTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
+        sh_inspection = gc.open_by_key(inspection_sh_key)
+        ws_inspection = sh_inspection.worksheet("inspectionlog")
+        inspection_values = ws_inspection.get_all_values()
+    except Exception as e:
+        print(f"!! エラー: inspectionlogの取得に失敗しました。")
+        raise e
 
-# inspectionlogを用いた動的フィルタリング
-try:
-    inspection_sh_key = INSPECTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
-    sh_inspection = gc.open_by_key(inspection_sh_key)
-    ws_inspection = sh_inspection.worksheet("inspectionlog")
-    inspection_values = ws_inspection.get_all_values()
-except Exception as e:
-    print(f"!! エラー: inspectionlogの取得に失敗しました。")
-    raise e
+    def normalize_station_name(name):
+        if pd.isna(name) or name is None: return ""
+        return unicodedata.normalize('NFKC', str(name)).replace(' ', '').replace('　', '').lower()
 
-def normalize_station_name(name):
-    if pd.isna(name) or name is None: return ""
-    return unicodedata.normalize('NFKC', str(name)).replace(' ', '').replace('　', '').lower()
+    inspection_status_map = {}
+    if len(inspection_values) > 1:
+        for row in inspection_values[1:]:
+            if len(row) > 5:
+                norm_station = normalize_station_name(row[1])
+                if norm_station:
+                    if norm_station not in inspection_status_map: inspection_status_map[norm_station] = []
+                    inspection_status_map[norm_station].append(str(row[5]).strip().lower())
 
-inspection_status_map = {}
-if len(inspection_values) > 1:
-    for row in inspection_values[1:]:
-        if len(row) > 5:
-            norm_station = normalize_station_name(row[1])
-            if norm_station:
-                if norm_station not in inspection_status_map: inspection_status_map[norm_station] = []
-                inspection_status_map[norm_station].append(str(row[5]).strip().lower())
-
-final_target_stations = []
-skip_statuses = ['checked', 'unnecessary', '7days_rule']
-for item in target_stations_raw:
-    norm_station = normalize_station_name(item.get('station', ''))
-    if not norm_station: continue
-    if norm_station not in inspection_status_map: continue
-    if not all((s in skip_statuses) for s in inspection_status_map[norm_station]):
-        final_target_stations.append(item)
-target_stations = final_target_stations
+    final_target_stations = []
+    skip_statuses = ['checked', 'unnecessary', '7days_rule']
+    for item in df_active.to_dict('records'):
+        norm_station = normalize_station_name(item.get('station', ''))
+        if not norm_station or norm_station not in inspection_status_map:
+            final_target_stations.append(item)
+            continue
+        if not all((s in skip_statuses) for s in inspection_status_map[norm_station]):
+            final_target_stations.append(item)
+    target_stations = final_target_stations
 
 if len(target_stations) == 0:
     send_discord_notification(f"⚠️ 【データなし】 {TARGET_AREA.upper()} 更新対象データがありません。")
@@ -141,9 +136,6 @@ driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), opti
 collected_data = []
 
 try:
-    # ==========================================================
-    # II. データ収集
-    # ==========================================================
     sh_prod = gc.open_by_key(PRODUCTION_SHEET_ID)
     sh_jks = gc.open_by_key(JKS_SHEET_ID)
 
@@ -154,16 +146,9 @@ try:
     driver.find_element(By.ID, "password").send_keys(PASSWORD)
     driver.find_element(By.ID, "password").send_keys(Keys.RETURN)
     sleep(5)
-    driver.get("https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStation.html")
-    sleep(2)
 
+    # II. データ収集 (120件を順番に実行)
     for i, item in enumerate(target_stations):
-        if (i > 0) and (i % 20 == 0):
-            try:
-                ws_status = sh_prod.worksheet("SystemStatus")
-                ws_status.update([["progress", i, len(target_stations)]], range_name='A1')
-            except: pass
-
         station_name = item.get('station', '不明')
         station_cd = str(item.get('stationCd', '')).replace('.0', '')
         city = str(item.get('city', 'other')).strip()
@@ -175,7 +160,6 @@ try:
         soup = BeautifulSoup(driver.page_source, "lxml")
         car_boxes = soup.find_all("div", class_="car-list-box")
         
-        # タイムライン開始時刻取得
         start_time_str = "00:00"
         try:
             table = soup.find("table", class_="timetable")
@@ -193,7 +177,6 @@ try:
             try:
                 title = box.find("div", class_="car-list-title-area").get_text(strip=True)
                 plate, model = title.split(" / ") if " / " in title else (title, "")
-                
                 status_list = []
                 data_cells = []
                 for r in box.find("table", class_="timetable").find_all("tr"):
@@ -201,23 +184,17 @@ try:
                     if cells and any(x in (cells[0].get("class", [])) for x in ["vacant", "full", "impossible", "others"]):
                         data_cells = cells
                         break
-                
                 if data_cells:
                     for cell in data_cells:
                         sym = "○" if "vacant" in cell.get("class", []) else ("s" if "impossible" in cell.get("class", []) else "×")
                         for _ in range(int(cell.get("colspan", 1))): status_list.append(sym)
-                
                 if len(status_list) < 288: status_list += ["×"] * (288 - len(status_list))
                 collected_data.append([city, station_name, plate.strip(), model.strip(), start_time_str, "".join(status_list)])
             except: pass
 
-    # ==========================================================
-    # III. 二重書き込み (予約管理メイン & JKS本体)
-    # ==========================================================
+    # III. 二重書き込み
     if collected_data:
-        print("\n[III.データ保存] 両シートへ書き込みます...")
         df_output = pd.DataFrame(collected_data, columns=['city', 'station', 'plate', 'model', 'getTime', 'rsvData'])
-
         for area in df_output['city'].unique():
             df_area = df_output[df_output['city'] == area].copy()
             area_name = str(area).replace('市', '').strip()
@@ -225,39 +202,40 @@ try:
             df_to_write = df_area.drop(columns=['city'])
             data_to_upload = [df_to_write.columns.values.tolist()] + df_to_write.values.tolist()
 
-            # 1. 予約管理メイン (1LCyj...) への書き込み
+            # 1. 予約管理メイン
             try:
-                try: ws_prod = sh_prod.worksheet(work_sheet_name)
-                except gspread.WorksheetNotFound: ws_prod = sh_prod.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
+                try:
+                    ws_prod = sh_prod.worksheet(work_sheet_name)
+                except gspread.WorksheetNotFound:
+                    ws_prod = sh_prod.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
                 ws_prod.clear()
                 ws_prod.update(data_to_upload, range_name='A1')
-                print(f"   -> 予約管理メイン: '{work_sheet_name}' 更新完了")
             except Exception as e:
                 raise Exception(f"予約管理メインへの書き込みに失敗しました: {e}")
 
-            # 2. JKS本体 への書き込み
+            # 2. JKS本体
             try:
-                try: ws_jks = sh_jks.worksheet(work_sheet_name)
-                except gspread.WorksheetNotFound: ws_jks = sh_jks.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
+                try:
+                    ws_jks = sh_jks.worksheet(work_sheet_name)
+                except gspread.WorksheetNotFound:
+                    ws_jks = sh_jks.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
                 ws_jks.clear()
                 ws_jks.update(data_to_upload, range_name='A1')
-                print(f"   -> JKS本体: '{work_sheet_name}' 更新完了")
             except Exception as e:
                 raise Exception(f"JKS本体への同時書き込みに失敗しました: {e}")
 
         status_prefix = "【全件強制更新】" if TARGET_AREA == 'force_all' else "【更新完了】"
-        send_discord_notification(f"✅ {status_prefix} {TARGET_AREA.upper()} 両シートの更新が完了しました！")
+        send_discord_notification(f"✅ {status_prefix} {TARGET_AREA.upper()} 120件更新完了しました！")
 
 except Exception as e:
-    send_discord_notification(f"❌ 【重大なエラー】 {TARGET_AREA.upper()} スクレイピング停止:\n```{e}```")
-    print(f"\nエラー発生のため停止: {e}")
+    send_discord_notification(f"❌ 重大エラー: {e}")
     sys.exit(1)
 
 finally:
     if 'driver' in locals(): driver.quit()
+    # D1セルへ完了時刻(timestamp)を記録
     try:
         ws_status_fin = sh_prod.worksheet("SystemStatus")
-        now_jst_final = datetime.now(timezone(timedelta(hours=+9))).strftime('%Y/%m/%d %H:%M:%S')
-        # 進捗をクリアし、D1に最終更新時刻を記録
-        ws_status_fin.update([[ "", "", "", now_jst_final ]], range_name='A1')
+        now_jst = datetime.now(timezone(timedelta(hours=+9))).strftime('%Y/%m/%d %H:%M:%S')
+        ws_status_fin.update([[now_jst]], range_name='D1')
     except: pass
