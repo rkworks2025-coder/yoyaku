@@ -20,10 +20,10 @@ jobs:
  
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4 # v3からv4に更新 (警告解消)
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5 # v4からv5に更新 (警告解消)
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
@@ -36,4 +36,4 @@ jobs:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           TARGET_AREA: ${{ github.event.inputs.target_area }}
           PYTHONUNBUFFERED: "1"
-        run: python yoyaku_main20260429.py # ファイル名をアップロードされたものに修正
+        run: python main.py
