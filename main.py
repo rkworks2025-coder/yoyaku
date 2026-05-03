@@ -42,7 +42,7 @@ USER_ID_2 = "927583"
 PASSWORD = "Ccj-322222"
 
 # 2. 設定
-PRODUCTION_SHEET_URL = "https://docs.google.com/spreadsheets/d/13cQngK_Xx38VU67yLS-iTHyOZgsACZdxM34l-Jq_U9A/edit"
+PRODUCTION_SHEET_URL = "https://docs.google.com/spreadsheets/d/1LCyj16nsRYBk5cTpx2Sb75qmtm3YGKNEIdeyUvZzQQI/edit"
 # ★JKS本体スプレッドシートID
 JKS_SHEET_ID = "16HYziQ5now1IATZJU3wZhTE08S_3B8xVP9MbfceHONE"
 
@@ -56,11 +56,6 @@ if not os.path.exists(SERVICE_ACCOUNT_KEY_FILE):
     sys.exit(1)
 
 gc = gspread.service_account(filename=SERVICE_ACCOUNT_KEY_FILE)
-
-# デバッグ用: サービスアカウントのメールアドレスを確認
-with open(SERVICE_ACCOUNT_KEY_FILE) as f:
-    _sa_info = json.load(f)
-    print(f"[DEBUG] client_email: {_sa_info.get('client_email', '不明')}")
 
 # エリアフィルタリング設定
 TARGET_AREA = os.environ.get('TARGET_AREA', 'all').lower()
@@ -265,9 +260,8 @@ try:
         send_discord_notification(f"<@1474004343207366839> ✅ {status_prefix} {TARGET_AREA.upper()} 両シートの更新が完了しました！")
 
 except Exception as e:
-    import traceback
-    send_discord_notification(f"<@1474004343207366839> ❌ 【重大なエラー】 {TARGET_AREA.upper()} スクレイピング停止:\n```{traceback.format_exc()}```")
-    print(f"\nエラー発生のため停止: {traceback.format_exc()}")
+    send_discord_notification(f"<@1474004343207366839> ❌ 【重大なエラー】 {TARGET_AREA.upper()} スクレイピング停止:\n```{e}```")
+    print(f"\nエラー発生のため停止: {e}")
     sys.exit(1)
 
 finally:
