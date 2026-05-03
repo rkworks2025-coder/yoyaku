@@ -57,6 +57,11 @@ if not os.path.exists(SERVICE_ACCOUNT_KEY_FILE):
 
 gc = gspread.service_account(filename=SERVICE_ACCOUNT_KEY_FILE)
 
+# デバッグ用: サービスアカウントのメールアドレスを確認
+with open(SERVICE_ACCOUNT_KEY_FILE) as f:
+    _sa_info = json.load(f)
+    print(f"[DEBUG] client_email: {_sa_info.get('client_email', '不明')}")
+
 # エリアフィルタリング設定
 TARGET_AREA = os.environ.get('TARGET_AREA', 'all').lower()
 print(f"\n[エリア指定] {TARGET_AREA}")
