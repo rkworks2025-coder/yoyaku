@@ -1,6 +1,9 @@
 # ==========================================================
-# 【GitHub Actions用】3エリア巡回システム (JKS本体同時書き込み版)
-# 改修内容: CarData_Ryu と JKS本体(16HYziQ...) への同時同期機能を追加
+# 【GitHub Actions用】多摩・府中エリア巡回システム (JKS本体同時書き込み版)
+# 改修内容:
+# 1. CarData_Ryu と JKS本体(16HYziQ...) への同時同期機能
+# 2. 新設ステーション対応(inspectionlogにない場合は未登録として送信)
+# 3. エリア抽象化(多摩・府中のみ対象)
 # ==========================================================
 import sys
 import os
@@ -64,7 +67,7 @@ print(f"\n[エリア指定] {TARGET_AREA}")
 if not os.path.exists(CSV_FILE_NAME):
     raise FileNotFoundError(f"エラー: '{CSV_FILE_NAME}' が見つかりません。")
 
-df_map = pd.read_csv(CSV_FILE_NAME)
+df_map = pd.read_csv(CSV_FILE_NAME, encoding='utf-8')
 df_map.columns = df_map.columns.str.strip()
 if 'area' in df_map.columns: df_map = df_map.rename(columns={'area': 'city'})
 if 'station_name' in df_map.columns: df_map = df_map.rename(columns={'station_name': 'station'})
@@ -75,10 +78,14 @@ if TARGET_AREA == 'force_all':
 else:
     filter_mask = df_map['status'].astype(str).str.lower().isin(['checked', 'unnecessary', '7days_rule'])
     df_active = df_map[~filter_mask].copy()
-    if TARGET_AREA == 'kanagawa':
-        df_active = df_active[df_active['city'].str.contains('大和|海老名', na=False)].copy()
-    elif TARGET_AREA == 'tama':
-        df_active = df_active[df_active['city'].str.contains('多摩', na=False)].copy()
+
+    # マッピング方式によるエリアの抽象化
+    area_map = {
+        'tama': '多摩',
+        'fuchu': '府中'
+    }
+    if TARGET_AREA in area_map:
+        df_active = df_active[df_active['city'].str.contains(area_map[TARGET_AREA], na=False)].copy()
 
 target_stations_raw = df_active.drop_duplicates(subset=['stationCd']).to_dict('records')
 
@@ -113,14 +120,21 @@ else:
     for item in target_stations_raw:
         norm_station = normalize_station_name(item.get('station', ''))
         if not norm_station: continue
+
+        # ログに存在しない場合はエラーにせず「未登録(新設)」としてGASへ送るためリストに追加
         if norm_station not in inspection_status_map:
-            raise ValueError(f"エラー: ステーション '{item.get('station')}' が inspectionlog に存在しません。")
+            print(f"   -> [未登録(新設)検知] 巡回対象に追加: {item.get('station')}")
+            final_target_stations.append(item)
+            continue
+
+        # ログに存在する場合は、ステータスによる絞り込みを実行
         if not all((s in skip_statuses) for s in inspection_status_map[norm_station]):
             final_target_stations.append(item)
+
     target_stations = final_target_stations
 
 if len(target_stations) == 0:
-    send_discord_notification(f"⚠️ 【データなし】 {TARGET_AREA.upper()} 更新対象データがありません。")
+    send_discord_notification(f"<@1474004343207366839> ⚠️ 【データなし】 {TARGET_AREA.upper()} 更新対象データがありません。")
     sys.exit()
 
 # ==========================================================
@@ -169,7 +183,7 @@ try:
 
         soup = BeautifulSoup(driver.page_source, "lxml")
         car_boxes = soup.find_all("div", class_="car-list-box")
-        
+
         # タイムライン開始時刻取得
         start_time_str = "00:00"
         try:
@@ -188,7 +202,7 @@ try:
             try:
                 title = box.find("div", class_="car-list-title-area").get_text(strip=True)
                 plate, model = title.split(" / ") if " / " in title else (title, "")
-                
+
                 status_list = []
                 data_cells = []
                 for r in box.find("table", class_="timetable").find_all("tr"):
@@ -196,12 +210,12 @@ try:
                     if cells and any(x in (cells[0].get("class", [])) for x in ["vacant", "full", "impossible", "others"]):
                         data_cells = cells
                         break
-                
+
                 if data_cells:
                     for cell in data_cells:
                         sym = "○" if "vacant" in cell.get("class", []) else ("s" if "impossible" in cell.get("class", []) else "×")
                         for _ in range(int(cell.get("colspan", 1))): status_list.append(sym)
-                
+
                 if len(status_list) < 288: status_list += ["×"] * (288 - len(status_list))
                 collected_data.append([city, station_name, plate.strip(), model.strip(), start_time_str, "".join(status_list)])
             except: pass
@@ -233,7 +247,7 @@ try:
             # 2. JKS本体 への書き込み (ID: 16HYziQ...)
             try:
                 try: ws_jks = sh_jks.worksheet(work_sheet_name)
-                except gspread.WorksheetNotFound: 
+                except gspread.WorksheetNotFound:
                     # 1ミリの不整合も許さないため、JKS側にシートがない場合はエラーで停止
                     raise Exception(f"JKS本体側に '{work_sheet_name}' タブが見つかりません。")
                 ws_jks.clear()
@@ -243,10 +257,10 @@ try:
                 raise Exception(f"JKS本体への同時書き込みに失敗しました: {e}")
 
         status_prefix = "【全件強制更新】" if TARGET_AREA == 'force_all' else "【更新完了】"
-        send_discord_notification(f"✅ {status_prefix} {TARGET_AREA.upper()} 両シートの更新が完了しました！")
+        send_discord_notification(f"<@1474004343207366839> ✅ {status_prefix} {TARGET_AREA.upper()} 両シートの更新が完了しました！")
 
 except Exception as e:
-    send_discord_notification(f"❌ 【重大なエラー】 {TARGET_AREA.upper()} スクレイピング停止:\n```{e}```")
+    send_discord_notification(f"<@1474004343207366839> ❌ 【重大なエラー】 {TARGET_AREA.upper()} スクレイピング停止:\n```{e}```")
     print(f"\nエラー発生のため停止: {e}")
     sys.exit(1)
 
