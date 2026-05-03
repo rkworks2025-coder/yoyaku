@@ -260,8 +260,9 @@ try:
         send_discord_notification(f"<@1474004343207366839> ✅ {status_prefix} {TARGET_AREA.upper()} 両シートの更新が完了しました！")
 
 except Exception as e:
-    send_discord_notification(f"<@1474004343207366839> ❌ 【重大なエラー】 {TARGET_AREA.upper()} スクレイピング停止:\n```{e}```")
-    print(f"\nエラー発生のため停止: {e}")
+    import traceback
+    send_discord_notification(f"<@1474004343207366839> ❌ 【重大なエラー】 {TARGET_AREA.upper()} スクレイピング停止:\n```{traceback.format_exc()}```")
+    print(f"\nエラー発生のため停止: {traceback.format_exc()}")
     sys.exit(1)
 
 finally:
