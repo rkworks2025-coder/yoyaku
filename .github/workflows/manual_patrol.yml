@@ -2,6 +2,17 @@ name: Manual Patrol Check
 
 on:
   workflow_dispatch:
+    inputs:
+      target_area:
+        description: '巡回エリア選択'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - tama
+          - fuchu
+          - force_all
 
 jobs:
   run-scraper:
@@ -23,6 +34,7 @@ jobs:
       - name: Run Patrol Script
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          TARGET_AREA: ${{ github.event.inputs.target_area }}
           PYTHONUNBUFFERED: "1"
         run: |
           echo "$GCP_SA_KEY" > service_account.json
