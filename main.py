@@ -39,7 +39,7 @@ def send_discord_notification(message):
 LOGIN_URL = "https://dailycheck.tc-extsys.jp/tcrappsweb/web/login/tawLogin.html"
 USER_ID_1 = "0030"
 USER_ID_2 = "927583"
-PASSWORD = "Ccj-322222"
+PASSWORD = "Ccj-222223"
 
 # 2. 設定
 PRODUCTION_SHEET_URL = "https://docs.google.com/spreadsheets/d/1LCyj16nsRYBk5cTpx2Sb75qmtm3YGKNEIdeyUvZzQQI/edit"
