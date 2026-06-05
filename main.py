@@ -1,6 +1,9 @@
 # ==========================================================
 # 【GitHub Actions用】多摩・府中エリア巡回システム (JKS本体同時書き込み版)
-# デバッグ版: except: pass → エラー出力に変更
+# 改修内容:
+# 1. CarData_Ryu と JKS本体(16HYziQ...) への同時同期機能
+# 2. 新設ステーション対応(inspectionlogにない場合は未登録として送信)
+# 3. エリア抽象化(多摩・府中のみ対象)
 # ==========================================================
 import sys
 import os
@@ -36,7 +39,7 @@ def send_discord_notification(message):
 LOGIN_URL = "https://dailycheck.tc-extsys.jp/tcrappsweb/web/login/tawLogin.html"
 USER_ID_1 = "0030"
 USER_ID_2 = "927583"
-PASSWORD = "Ccj-222223"
+PASSWORD = "Ccj-322222"
 
 # 2. 設定
 PRODUCTION_SHEET_URL = "https://docs.google.com/spreadsheets/d/1LCyj16nsRYBk5cTpx2Sb75qmtm3YGKNEIdeyUvZzQQI/edit"
@@ -176,13 +179,6 @@ try:
         soup = BeautifulSoup(driver.page_source, "lxml")
         car_boxes = soup.find_all("div", class_="car-list-box")
 
-        # ★デバッグ: car_boxesが空の場合を検知
-        if not car_boxes:
-            print(f"  !! [デバッグ] car-list-boxが0件: {station_name} (stationCd={station_cd})")
-            # ページのタイトルやURLを出力
-            print(f"  !! 現在URL: {driver.current_url}")
-            print(f"  !! ページタイトル: {driver.title}")
-
         # タイムライン開始時刻取得
         start_time_str = "00:00"
         try:
@@ -195,8 +191,7 @@ try:
                     target_date = now - timedelta(days=1) if raw_h > now.hour + 12 else now
                     start_time_str = f"{target_date.strftime('%Y-%m-%d')} {raw_h:02d}:00"
                     break
-        except Exception as e:
-            print(f"  !! タイムライン時刻取得エラー [{station_name}]: {e}")
+        except: pass
 
         for box in car_boxes:
             try:
@@ -219,14 +214,11 @@ try:
                 if len(status_list) < 288: status_list += ["×"] * (288 - len(status_list))
                 collected_data.append([city, station_name, plate.strip(), model.strip(), start_time_str, "".join(status_list)])
             except Exception as ex:
-                # ★デバッグ: 車両解析エラーを出力
                 print(f"  !! 車両解析エラー [{station_name}]: {ex}")
 
     # ==========================================================
     # III. 二重書き込み (CarData_Ryu & JKS本体)
     # ==========================================================
-    print(f"\n[デバッグ] collected_data件数: {len(collected_data)}")
-
     if collected_data:
         print("\n[III.データ保存] 両シートへ書き込みます...")
         df_output = pd.DataFrame(collected_data, columns=['city', 'station', 'plate', 'model', 'getTime', 'rsvData'])
@@ -262,8 +254,9 @@ try:
         status_prefix = "【全件強制更新】" if TARGET_AREA == 'force_all' else "【更新完了】"
         send_discord_notification(f"<@1474004343207366839> ✅ {status_prefix} {TARGET_AREA.upper()} 両シートの更新が完了しました！")
     else:
-        print("!! [警告] collected_dataが空のため書き込みをスキップしました")
-        send_discord_notification(f"<@1474004343207366839> ⚠️ 【警告】 {TARGET_AREA.upper()} スクレイピング完了しましたがデータが0件でした")
+        # データが0件の場合はDiscordに警告を送る
+        print("!! [警告] スクレイピング完了しましたがデータが0件でした")
+        send_discord_notification(f"<@1474004343207366839> ⚠️ 【警告】 {TARGET_AREA.upper()} スクレイピング完了しましたがデータが0件でした。ログインや構造を確認してください。")
 
 except Exception as e:
     send_discord_notification(f"<@1474004343207366839> ❌ 【重大なエラー】 {TARGET_AREA.upper()} スクレイピング停止:\n```{e}```")
