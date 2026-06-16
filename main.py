@@ -251,6 +251,21 @@ try:
             except Exception as e:
                 raise Exception(f"JKS本体への同時書き込みに失敗しました: {e}")
 
+        # force_all完了後: GASのforceAllAbsenceCheckを呼び出してTMA不在シートを上書き更新
+        if TARGET_AREA == 'force_all':
+            GAS_URL = "https://script.google.com/macros/s/AKfycbwpNRM_753x0gG5sl5_LTwxn5afUUQqezpmPb874-Stsl5aVUJBLTBk70nW5RE_mdU0/exec"
+            try:
+                req = urllib.request.Request(
+                    f"{GAS_URL}?action=forceAllAbsenceCheck",
+                    headers={"User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(req, timeout=60) as res:
+                    gas_result = json.loads(res.read().decode())
+                    print(f"[forceAllAbsenceCheck] {gas_result}")
+            except Exception as e:
+                print(f"!! [警告] forceAllAbsenceCheck呼び出し失敗: {e}")
+                send_discord_notification(f"<@1474004343207366839> ⚠️ 【警告】 force_all完了後のTMA不在チェック呼び出しに失敗しました:\n```{e}```")
+
         status_prefix = "【全件強制更新】" if TARGET_AREA == 'force_all' else "【更新完了】"
         send_discord_notification(f"<@1474004343207366839> ✅ {status_prefix} {TARGET_AREA.upper()} 両シートの更新が完了しました！")
     else:
