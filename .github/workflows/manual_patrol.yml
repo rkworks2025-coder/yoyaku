@@ -13,6 +13,14 @@ on:
           - tama
           - fuchu
           - force_all
+      pw_mode:
+        description: 'TMAログインPWモード'
+        required: true
+        default: 'mode1'
+        type: choice
+        options:
+          - mode1
+          - mode2
 
 jobs:
   run-scraper:
@@ -35,6 +43,7 @@ jobs:
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
           TARGET_AREA: ${{ github.event.inputs.target_area }}
+          PW_MODE: ${{ github.event.inputs.pw_mode }}
           PYTHONUNBUFFERED: "1"
         run: |
           echo "$GCP_SA_KEY" > service_account.json
