@@ -214,19 +214,9 @@ try:
         soup = BeautifulSoup(driver.page_source, "lxml")
         car_boxes = soup.find_all("div", class_="car-list-box")
 
-        # タイムライン開始時刻取得
-        start_time_str = "00:00"
-        try:
-            table = soup.find("table", class_="timetable")
-            for r in table.find_all("tr"):
-                cell = r.find("td", class_="timeline")
-                if cell and cell.get_text(strip=True).isdigit():
-                    raw_h = int(cell.get_text(strip=True))
-                    now = datetime.now(timezone(timedelta(hours=+9)))
-                    target_date = now - timedelta(days=1) if raw_h > now.hour + 12 else now
-                    start_time_str = f"{target_date.strftime('%Y-%m-%d')} {raw_h:02d}:00"
-                    break
-        except: pass
+        # タイムライン開始時刻取得 (DOMに依存せず現在時刻のHH:00を使用)
+        now_jst = datetime.now(timezone(timedelta(hours=+9)))
+        start_time_str = now_jst.strftime('%Y-%m-%d %H:00')
 
         for box in car_boxes:
             try:
