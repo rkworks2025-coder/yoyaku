@@ -4,9 +4,13 @@
 # 1. CarData_Ryu と JKS本体(16HYziQ...) への同時同期機能
 # 2. 新設ステーション対応(inspectionlogにない場合は未登録として送信)
 # 3. エリア抽象化(多摩・府中のみ対象)
+# 4. ★プレート正規化追加: TMAページのタイトル表記(伝統的なスペース区切り
+#    ナンバー表示)をそのまま取り込まないよう、スクレイピング入口で
+#    全角/半角スペース・ゼロ幅相当の空白類を除去する正規化を追加
 # ==========================================================
 import sys
 import os
+import re
 import pandas as pd
 import gspread
 import unicodedata
@@ -34,6 +38,18 @@ def send_discord_notification(message):
         urllib.request.urlopen(req)
     except Exception as e:
         print(f"Discord通知エラー: {e}")
+
+# ==========================================================
+# ★プレート正規化関数
+# TMAページの表示テキストは伝統的な「地名 分類番号 かな 一連番号」の
+# スペース区切り表記のことがあるため、取得した瞬間にここで正規化する。
+# 全角/半角スペース・タブ・改行などの空白類を位置を問わず全除去する。
+# GAS側のnormalizePlate()と同じ考え方に合わせている。
+# ==========================================================
+def normalize_plate(s):
+    if not s:
+        return ""
+    return re.sub(r'[\s\u3000]', '', str(s)).strip()
 
 # 1. ログイン情報設定
 LOGIN_URL = "https://dailycheck.tc-extsys.jp/tcrappsweb/web/login/tawLogin.html"
@@ -221,7 +237,9 @@ try:
         for box in car_boxes:
             try:
                 title = box.find("div", class_="car-list-title-area").get_text(strip=True)
-                plate, model = title.split(" / ") if " / " in title else (title, "")
+                plate_raw, model = title.split(" / ") if " / " in title else (title, "")
+                # ★ここでTMA表示由来の空白（表示フォーマットのスペース区切り）を正規化して除去
+                plate = normalize_plate(plate_raw)
 
                 status_list = []
                 data_cells = []
@@ -237,7 +255,7 @@ try:
                         for _ in range(int(cell.get("colspan", 1))): status_list.append(sym)
 
                 if len(status_list) < 288: status_list += ["×"] * (288 - len(status_list))
-                collected_data.append([city, station_name, plate.strip(), model.strip(), start_time_str, "".join(status_list)])
+                collected_data.append([city, station_name, plate, model.strip(), start_time_str, "".join(status_list)])
             except Exception as ex:
                 print(f"  !! 車両解析エラー [{station_name}]: {ex}")
 
