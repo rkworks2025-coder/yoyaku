@@ -1,30 +1,50 @@
 # ==========================================================
 # 【GitHub Actions用】多摩・府中エリア巡回システム (JKS本体同時書き込み版)
 # 改修内容:
-# 1. CarData_Ryu と JKS本体(16HYziQ...) への同時同期機能
+# 1. 予約管理メイン(旧CarData_Ryu) と JKS本体(16HYziQ...) への同時同期機能
 # 2. 新設ステーション対応(inspectionlogにない場合は未登録として送信)
 # 3. エリア抽象化(多摩・府中のみ対象)
 # 4. ★プレート正規化追加: TMAページのタイトル表記(伝統的なスペース区切り
 #    ナンバー表示)をそのまま取り込まないよう、スクレイピング入口で
 #    全角/半角スペース・ゼロ幅相当の空白類を除去する正規化を追加
+# 5. ★スクレイピング/書き込み 2段ジョブ分割対応:
+#    STAGE=scrape でスクレイピングのみ実行しcollected_data.jsonへ保存
+#    STAGE=write  でJSON読込→シート書き込みのみ実行（リトライ対象はこちらのみ）
+#    STAGE未指定(all)は従来通り一括実行（ローカル動作確認用）
+# 6. ★書き込みリトライ発生時のDiscord通知を追加（label付き）。
+#    5回とも失敗した場合は専用の「上限到達」通知のみ送信し、
+#    従来の「重大なエラー」通知とは重複させない
 # ==========================================================
 import sys
 import os
 import re
+import json
 import pandas as pd
 import gspread
 import unicodedata
 import urllib.request
-import json
 from time import sleep
 from datetime import datetime, timezone, timedelta
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from bs4 import BeautifulSoup
+
+# エリアフィルタリング設定
+TARGET_AREA = os.environ.get('TARGET_AREA', 'all').lower()
+print(f"\n[エリア指定] {TARGET_AREA}")
+
+# STAGE: 'scrape'=収集のみ, 'write'=書き込みのみ, 'all'=一括（未指定時のデフォルト、ローカル確認用）
+STAGE = os.environ.get('STAGE', 'all').lower()
+NEEDS_SCRAPE = STAGE in ('scrape', 'all')
+NEEDS_WRITE = STAGE in ('write', 'all')
+COLLECTED_DATA_FILE = "collected_data.json"
+
+# Seleniumはscrape段階でのみ必要
+if NEEDS_SCRAPE:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
 
 # --- Discord通知用設定 ---
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1519636194294501527/hO_o-TwvsSI336T-8imdtHD8nLe530mkTTsbMmGxpn7Q7DhcRGdjSNW68d4HAMVxiIv9"
@@ -80,11 +100,23 @@ if not os.path.exists(SERVICE_ACCOUNT_KEY_FILE):
 gc = gspread.service_account(filename=SERVICE_ACCOUNT_KEY_FILE)
 
 # ==========================================================
-# リトライ付きAPI呼び出しラッパー
+# ★上限到達済みリトライを示す専用例外
+# with_retryが5回とも失敗した場合にこれを送出する。
+# この時点で「上限到達」通知は送信済みのため、外側の
+# 「重大なエラー」通知と重複させないための目印として使う。
+# ==========================================================
+class RetryExhaustedError(Exception):
+    pass
+
+# ==========================================================
+# リトライ付きAPI呼び出しラッパー（書き込み専用）
 # Google Sheets APIの一時的なエラー(5xx, 429)のみリトライする
 # 5回, 1→2→4→8→16秒の指数バックオフ
+# ★label: どの書き込み処理か判別するための表示名（Discord通知用）
+# ★リトライ試行のたびにDiscord通知。5回とも失敗した場合は
+#   「上限到達」専用通知のみ送り、以後は外側で重複通知しない
 # ==========================================================
-def with_retry(func, *args, **kwargs):
+def with_retry(func, *args, label="不明な処理", **kwargs):
     max_retries = 5
     delay = 1
     last_exception = None
@@ -98,233 +130,269 @@ def with_retry(func, *args, **kwargs):
             except Exception:
                 pass
             is_retryable = (status_code == 429) or (status_code is not None and 500 <= status_code < 600)
-            if not is_retryable or attempt == max_retries:
+            if not is_retryable:
                 raise
+            if attempt == max_retries:
+                send_discord_notification(f"<@1474004343207366839> ⛔ {label} への書き込みに{max_retries}回失敗。時間をおいて再実行してください。")
+                raise RetryExhaustedError(f"{label}: 上限{max_retries}回リトライしても失敗 ({e})") from e
             print(f"   !! [リトライ {attempt}/{max_retries}] APIエラー(status={status_code})。{delay}秒後に再試行します...")
+            send_discord_notification(f"⚠️ [リトライ {attempt}/{max_retries}] {label} への書き込みを再試行中...")
             last_exception = e
             sleep(delay)
             delay *= 2
     if last_exception:
         raise last_exception
 
-# エリアフィルタリング設定
-TARGET_AREA = os.environ.get('TARGET_AREA', 'all').lower()
-print(f"\n[エリア指定] {TARGET_AREA}")
-
-# ==========================================================
-# I. リスト読み込み
-# ==========================================================
-if not os.path.exists(CSV_FILE_NAME):
-    raise FileNotFoundError(f"エラー: '{CSV_FILE_NAME}' が見つかりません。")
-
-df_map = pd.read_csv(CSV_FILE_NAME, encoding='utf-8')
-df_map.columns = df_map.columns.str.strip()
-if 'area' in df_map.columns: df_map = df_map.rename(columns={'area': 'city'})
-if 'station_name' in df_map.columns: df_map = df_map.rename(columns={'station_name': 'station'})
-if 'status' not in df_map.columns: df_map['status'] = ""
-
-if TARGET_AREA == 'force_all':
-    df_active = df_map.copy()
-else:
-    filter_mask = df_map['status'].astype(str).str.lower().isin(['checked', 'unnecessary', '7days_rule'])
-    df_active = df_map[~filter_mask].copy()
-
-    area_map = {
-        'tama': '多摩',
-        'fuchu': '府中'
-    }
-    if TARGET_AREA in area_map:
-        df_active = df_active[df_active['city'].str.contains(area_map[TARGET_AREA], na=False)].copy()
-
-target_stations_raw = df_active.drop_duplicates(subset=['stationCd']).to_dict('records')
-
-# inspectionlogを用いた動的フィルタリング
-if TARGET_AREA == 'force_all':
-    target_stations = target_stations_raw
-else:
-    try:
-        inspection_sh_key = INSPECTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
-        sh_inspection = gc.open_by_key(inspection_sh_key)
-        ws_inspection = sh_inspection.worksheet("inspectionlog")
-        inspection_values = ws_inspection.get_all_values()
-    except Exception as e:
-        print(f"!! エラー: inspectionlogの取得に失敗しました。")
-        raise e
-
-    def normalize_station_name(name):
-        if pd.isna(name) or name is None: return ""
-        return unicodedata.normalize('NFKC', str(name)).replace(' ', '').replace('　', '').lower()
-
-    inspection_status_map = {}
-    if len(inspection_values) > 1:
-        for row in inspection_values[1:]:
-            if len(row) > 5:
-                norm_station = normalize_station_name(row[1])
-                if norm_station:
-                    if norm_station not in inspection_status_map: inspection_status_map[norm_station] = []
-                    inspection_status_map[norm_station].append(str(row[5]).strip().lower())
-
-    final_target_stations = []
-    skip_statuses = ['checked', 'unnecessary', '7days_rule']
-    for item in target_stations_raw:
-        norm_station = normalize_station_name(item.get('station', ''))
-        if not norm_station: continue
-
-        if norm_station not in inspection_status_map:
-            print(f"   -> [未登録(新設)検知] 巡回対象に追加: {item.get('station')}")
-            final_target_stations.append(item)
-            continue
-
-        if not all((s in skip_statuses) for s in inspection_status_map[norm_station]):
-            final_target_stations.append(item)
-
-    target_stations = final_target_stations
-
-if len(target_stations) == 0:
-    send_discord_notification(f"<@1474004343207366839> ⚠️ 【データなし】 {TARGET_AREA.upper()} 更新対象データがありません。")
-    sys.exit()
-
-# ==========================================================
-# ドライバ設定
-# ==========================================================
-options = Options()
-options.add_argument('--headless')
-options.add_argument('--no-sandbox')
-options.add_argument('--disable-dev-shm-usage')
-driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 collected_data = []
 
-try:
+if NEEDS_SCRAPE:
     # ==========================================================
-    # II. データ収集
+    # I. リスト読み込み
     # ==========================================================
-    prod_sh_key = PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
-    sh_prod = gc.open_by_key(prod_sh_key)
-    sh_jks = gc.open_by_key(JKS_SHEET_ID)
+    if not os.path.exists(CSV_FILE_NAME):
+        raise FileNotFoundError(f"エラー: '{CSV_FILE_NAME}' が見つかりません。")
 
-    driver.get(LOGIN_URL)
-    sleep(3)
-    driver.find_element(By.ID, "cardNo1").send_keys(USER_ID_1)
-    driver.find_element(By.ID, "cardNo2").send_keys(USER_ID_2)
-    driver.find_element(By.ID, "password").send_keys(PASSWORD)
-    driver.find_element(By.ID, "password").send_keys(Keys.RETURN)
-    sleep(5)
-    driver.get("https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStation.html")
-    sleep(2)
+    df_map = pd.read_csv(CSV_FILE_NAME, encoding='utf-8')
+    df_map.columns = df_map.columns.str.strip()
+    if 'area' in df_map.columns: df_map = df_map.rename(columns={'area': 'city'})
+    if 'station_name' in df_map.columns: df_map = df_map.rename(columns={'station_name': 'station'})
+    if 'status' not in df_map.columns: df_map['status'] = ""
 
-    for i, item in enumerate(target_stations):
-        if (i > 0) and (i % 20 == 0):
-            try:
-                ws_status = sh_prod.worksheet("SystemStatus")
-                ws_status.update([["progress", i, len(target_stations)]], "A1")
-            except: pass
+    if TARGET_AREA == 'force_all':
+        df_active = df_map.copy()
+    else:
+        filter_mask = df_map['status'].astype(str).str.lower().isin(['checked', 'unnecessary', '7days_rule'])
+        df_active = df_map[~filter_mask].copy()
 
-        station_name = item.get('station', '不明')
-        station_cd = str(item.get('stationCd', '')).replace('.0', '')
-        city = str(item.get('city', 'other')).strip()
+        area_map = {
+            'tama': '多摩',
+            'fuchu': '府中'
+        }
+        if TARGET_AREA in area_map:
+            df_active = df_active[df_active['city'].str.contains(area_map[TARGET_AREA], na=False)].copy()
 
-        print(f"[{i+1}/{len(target_stations)}] {station_name}...")
-        driver.get(f"https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStationVehicle.html?stationCd={station_cd}")
+    target_stations_raw = df_active.drop_duplicates(subset=['stationCd']).to_dict('records')
+
+    # inspectionlogを用いた動的フィルタリング
+    if TARGET_AREA == 'force_all':
+        target_stations = target_stations_raw
+    else:
+        try:
+            inspection_sh_key = INSPECTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
+            sh_inspection = gc.open_by_key(inspection_sh_key)
+            ws_inspection = sh_inspection.worksheet("inspectionlog")
+            inspection_values = ws_inspection.get_all_values()
+        except Exception as e:
+            print(f"!! エラー: inspectionlogの取得に失敗しました。")
+            raise e
+
+        def normalize_station_name(name):
+            if pd.isna(name) or name is None: return ""
+            return unicodedata.normalize('NFKC', str(name)).replace(' ', '').replace('　', '').lower()
+
+        inspection_status_map = {}
+        if len(inspection_values) > 1:
+            for row in inspection_values[1:]:
+                if len(row) > 5:
+                    norm_station = normalize_station_name(row[1])
+                    if norm_station:
+                        if norm_station not in inspection_status_map: inspection_status_map[norm_station] = []
+                        inspection_status_map[norm_station].append(str(row[5]).strip().lower())
+
+        final_target_stations = []
+        skip_statuses = ['checked', 'unnecessary', '7days_rule']
+        for item in target_stations_raw:
+            norm_station = normalize_station_name(item.get('station', ''))
+            if not norm_station: continue
+
+            if norm_station not in inspection_status_map:
+                print(f"   -> [未登録(新設)検知] 巡回対象に追加: {item.get('station')}")
+                final_target_stations.append(item)
+                continue
+
+            if not all((s in skip_statuses) for s in inspection_status_map[norm_station]):
+                final_target_stations.append(item)
+
+        target_stations = final_target_stations
+
+    if len(target_stations) == 0:
+        send_discord_notification(f"<@1474004343207366839> ⚠️ 【データなし】 {TARGET_AREA.upper()} 更新対象データがありません。")
+        if STAGE == 'scrape':
+            with open(COLLECTED_DATA_FILE, "w", encoding="utf-8") as f:
+                json.dump({"target_area": TARGET_AREA, "collected_data": []}, f, ensure_ascii=False)
+        sys.exit()
+
+    # ==========================================================
+    # ドライバ設定
+    # ==========================================================
+    options = Options()
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+
+    try:
+        # ==========================================================
+        # II. データ収集
+        # ==========================================================
+        prod_sh_key = PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
+        sh_prod = gc.open_by_key(prod_sh_key)
+        sh_jks = gc.open_by_key(JKS_SHEET_ID)
+
+        driver.get(LOGIN_URL)
+        sleep(3)
+        driver.find_element(By.ID, "cardNo1").send_keys(USER_ID_1)
+        driver.find_element(By.ID, "cardNo2").send_keys(USER_ID_2)
+        driver.find_element(By.ID, "password").send_keys(PASSWORD)
+        driver.find_element(By.ID, "password").send_keys(Keys.RETURN)
+        sleep(5)
+        driver.get("https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStation.html")
         sleep(2)
 
-        soup = BeautifulSoup(driver.page_source, "lxml")
-        car_boxes = soup.find_all("div", class_="car-list-box")
+        for i, item in enumerate(target_stations):
+            if (i > 0) and (i % 20 == 0):
+                try:
+                    ws_status = sh_prod.worksheet("SystemStatus")
+                    ws_status.update([["progress", i, len(target_stations)]], "A1")
+                except: pass
 
-        # タイムライン開始時刻取得 (DOMに依存せず現在時刻のHH:00を使用)
-        now_jst = datetime.now(timezone(timedelta(hours=+9)))
-        start_time_str = now_jst.strftime('%Y-%m-%d %H:00')
+            station_name = item.get('station', '不明')
+            station_cd = str(item.get('stationCd', '')).replace('.0', '')
+            city = str(item.get('city', 'other')).strip()
 
-        for box in car_boxes:
-            try:
-                title = box.find("div", class_="car-list-title-area").get_text(strip=True)
-                plate_raw, model = title.split(" / ") if " / " in title else (title, "")
-                # ★ここでTMA表示由来の空白（表示フォーマットのスペース区切り）を正規化して除去
-                plate = normalize_plate(plate_raw)
+            print(f"[{i+1}/{len(target_stations)}] {station_name}...")
+            driver.get(f"https://dailycheck.tc-extsys.jp/tcrappsweb/web/routineStationVehicle.html?stationCd={station_cd}")
+            sleep(2)
 
-                status_list = []
-                data_cells = []
-                for r in box.find("table", class_="timetable").find_all("tr"):
-                    cells = r.find_all("td")
-                    if cells and any(x in (cells[0].get("class", [])) for x in ["vacant", "full", "impossible", "others"]):
-                        data_cells = cells
-                        break
+            soup = BeautifulSoup(driver.page_source, "lxml")
+            car_boxes = soup.find_all("div", class_="car-list-box")
 
-                if data_cells:
-                    for cell in data_cells:
-                        sym = "○" if "vacant" in cell.get("class", []) else ("s" if "impossible" in cell.get("class", []) else "×")
-                        for _ in range(int(cell.get("colspan", 1))): status_list.append(sym)
+            # タイムライン開始時刻取得 (DOMに依存せず現在時刻のHH:00を使用)
+            now_jst = datetime.now(timezone(timedelta(hours=+9)))
+            start_time_str = now_jst.strftime('%Y-%m-%d %H:00')
 
-                if len(status_list) < 288: status_list += ["×"] * (288 - len(status_list))
-                collected_data.append([city, station_name, plate, model.strip(), start_time_str, "".join(status_list)])
-            except Exception as ex:
-                print(f"  !! 車両解析エラー [{station_name}]: {ex}")
+            for box in car_boxes:
+                try:
+                    title = box.find("div", class_="car-list-title-area").get_text(strip=True)
+                    plate_raw, model = title.split(" / ") if " / " in title else (title, "")
+                    # ★ここでTMA表示由来の空白（表示フォーマットのスペース区切り）を正規化して除去
+                    plate = normalize_plate(plate_raw)
 
-    # ==========================================================
-    # III. 二重書き込み (CarData_Ryu & JKS本体)
-    # ==========================================================
-    if collected_data:
-        print("\n[III.データ保存] 両シートへ書き込みます...")
-        df_output = pd.DataFrame(collected_data, columns=['city', 'station', 'plate', 'model', 'getTime', 'rsvData'])
+                    status_list = []
+                    data_cells = []
+                    for r in box.find("table", class_="timetable").find_all("tr"):
+                        cells = r.find_all("td")
+                        if cells and any(x in (cells[0].get("class", [])) for x in ["vacant", "full", "impossible", "others"]):
+                            data_cells = cells
+                            break
 
-        for area in df_output['city'].unique():
-            df_area = df_output[df_output['city'] == area].copy()
-            area_name = str(area).replace('市', '').strip()
-            work_sheet_name = f"{area_name}_更新用"
-            df_to_write = df_area.drop(columns=['city'])
-            data_to_upload = [df_to_write.columns.values.tolist()] + df_to_write.values.tolist()
+                    if data_cells:
+                        for cell in data_cells:
+                            sym = "○" if "vacant" in cell.get("class", []) else ("s" if "impossible" in cell.get("class", []) else "×")
+                            for _ in range(int(cell.get("colspan", 1))): status_list.append(sym)
 
-            # 1. CarData_Ryu への書き込み
-            try:
-                try: ws_prod = sh_prod.worksheet(work_sheet_name)
-                except gspread.WorksheetNotFound: ws_prod = sh_prod.add_worksheet(title=work_sheet_name, rows=len(df_area)+10, cols=10)
-                with_retry(ws_prod.clear)
-                with_retry(ws_prod.update, data_to_upload, range_name='A1')
-                print(f"   -> CarData_Ryu: '{work_sheet_name}' 更新完了")
-            except Exception as e:
-                raise Exception(f"CarData_Ryuへの書き込みに失敗しました: {e}")
+                    if len(status_list) < 288: status_list += ["×"] * (288 - len(status_list))
+                    collected_data.append([city, station_name, plate, model.strip(), start_time_str, "".join(status_list)])
+                except Exception as ex:
+                    print(f"  !! 車両解析エラー [{station_name}]: {ex}")
 
-            # 2. JKS本体 への書き込み
-            try:
-                try: ws_jks = sh_jks.worksheet(work_sheet_name)
-                except gspread.WorksheetNotFound:
-                    raise Exception(f"JKS本体側に '{work_sheet_name}' タブが見つかりません。")
-                with_retry(ws_jks.clear)
-                with_retry(ws_jks.update, data_to_upload, range_name='A1')
-                print(f"   -> JKS本体: '{work_sheet_name}' 更新完了")
-            except Exception as e:
-                raise Exception(f"JKS本体への同時書き込みに失敗しました: {e}")
+        if STAGE == 'scrape':
+            # ★scrape専用: 収集結果をJSONに保存。書き込みはwrite jobに任せる
+            with open(COLLECTED_DATA_FILE, "w", encoding="utf-8") as f:
+                json.dump({"target_area": TARGET_AREA, "collected_data": collected_data}, f, ensure_ascii=False)
+            print(f"\n[scrape完了] {len(collected_data)}件を{COLLECTED_DATA_FILE}に保存しました。")
 
-        # force_all完了後: GASのforceAllAbsenceCheckを呼び出してTMA不在シートを上書き更新
-        if TARGET_AREA == 'force_all':
-            GAS_URL = "https://script.google.com/macros/s/AKfycbwpNRM_753x0gG5sl5_LTwxn5afUUQqezpmPb874-Stsl5aVUJBLTBk70nW5RE_mdU0/exec"
-            try:
-                req = urllib.request.Request(
-                    f"{GAS_URL}?action=forceAllAbsenceCheck",
-                    headers={"User-Agent": "Mozilla/5.0"}
-                )
-                with urllib.request.urlopen(req, timeout=60) as res:
-                    gas_result = json.loads(res.read().decode())
-                    print(f"[forceAllAbsenceCheck] {gas_result}")
-            except Exception as e:
-                print(f"!! [警告] forceAllAbsenceCheck呼び出し失敗: {e}")
-                send_discord_notification(f"<@1474004343207366839> ⚠️ 【警告】 force_all完了後のTMA不在チェック呼び出しに失敗しました:\n```{e}```")
+    except Exception as e:
+        print(f"\nエラー発生のため停止: {e}")
+        if not isinstance(e, RetryExhaustedError):
+            send_discord_notification(f"<@1474004343207366839> ❌ 【重大なエラー】 {TARGET_AREA.upper()} スクレイピング停止:\n```{e}```")
+        sys.exit(1)
 
-        status_prefix = "【全件強制更新】" if TARGET_AREA == 'force_all' else "【更新完了】"
-        send_discord_notification(f"<@1474004343207366839> ✅ {status_prefix} {TARGET_AREA.upper()} 両シートの更新が完了しました！")
-    else:
-        # データが0件の場合はDiscordに警告を送る
-        print("!! [警告] スクレイピング完了しましたがデータが0件でした")
-        send_discord_notification(f"<@1474004343207366839> ⚠️ 【警告】 {TARGET_AREA.upper()} スクレイピング完了しましたがデータが0件でした。ログインや構造を確認してください。")
+    finally:
+        if 'driver' in locals(): driver.quit()
+        try:
+            sh_prod_fin = gc.open_by_key(prod_sh_key)
+            ws_status_fin = sh_prod_fin.worksheet("SystemStatus")
+            ws_status_fin.clear()
+        except: pass
 
-except Exception as e:
-    send_discord_notification(f"<@1474004343207366839> ❌ 【重大なエラー】 {TARGET_AREA.upper()} スクレイピング停止:\n```{e}```")
-    print(f"\nエラー発生のため停止: {e}")
-    sys.exit(1)
+if NEEDS_WRITE:
+    if STAGE == 'write':
+        # ★write専用: scrape jobがartifactとして保存したJSONを読み込む
+        if not os.path.exists(COLLECTED_DATA_FILE):
+            print(f"!! エラー: {COLLECTED_DATA_FILE} が見つかりません（scrape jobのartifactを確認してください）。")
+            sys.exit(1)
+        with open(COLLECTED_DATA_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        collected_data = payload.get("collected_data", [])
+        TARGET_AREA = payload.get("target_area", TARGET_AREA)
 
-finally:
-    if 'driver' in locals(): driver.quit()
     try:
-        sh_prod_fin = gc.open_by_key(prod_sh_key)
-        ws_status_fin = sh_prod_fin.worksheet("SystemStatus")
-        ws_status_fin.clear()
-    except: pass
+        # ==========================================================
+        # III. 二重書き込み (予約管理メイン & JKS本体)
+        # ==========================================================
+        if collected_data:
+            print("\n[III.データ保存] 両シートへ書き込みます...")
+            prod_sh_key = PRODUCTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
+            sh_prod = gc.open_by_key(prod_sh_key)
+            sh_jks = gc.open_by_key(JKS_SHEET_ID)
+
+            df_output = pd.DataFrame(collected_data, columns=['city', 'station', 'plate', 'model', 'getTime', 'rsvData'])
+
+            for area in df_output['city'].unique():
+                df_area = df_output[df_output['city'] == area].copy()
+                area_name = str(area).replace('市', '').strip()
+                work_sheet_name = f"{area_name}_更新用"
+                df_to_write = df_area.drop(columns=['city'])
+                data_to_upload = [df_to_write.columns.values.tolist()] + df_to_write.values.tolist()
+
+                # 1. 予約管理メイン（旧CarData_Ryu）への書き込み
+                try:
+                    try: ws_prod = with_retry(sh_prod.worksheet, work_sheet_name, label=f"予約管理メイン/{work_sheet_name}")
+                    except gspread.WorksheetNotFound: ws_prod = with_retry(sh_prod.add_worksheet, title=work_sheet_name, rows=len(df_area)+10, cols=10, label=f"予約管理メイン/{work_sheet_name}")
+                    with_retry(ws_prod.clear, label=f"予約管理メイン/{work_sheet_name}")
+                    with_retry(ws_prod.update, data_to_upload, range_name='A1', label=f"予約管理メイン/{work_sheet_name}")
+                    print(f"   -> 予約管理メイン: '{work_sheet_name}' 更新完了")
+                except Exception as e:
+                    if isinstance(e, RetryExhaustedError): raise
+                    raise Exception(f"予約管理メインへの書き込みに失敗しました: {e}")
+
+                # 2. JKS本体 への書き込み
+                try:
+                    try: ws_jks = with_retry(sh_jks.worksheet, work_sheet_name, label=f"JKS本体/{work_sheet_name}")
+                    except gspread.WorksheetNotFound:
+                        raise Exception(f"JKS本体側に '{work_sheet_name}' タブが見つかりません。")
+                    with_retry(ws_jks.clear, label=f"JKS本体/{work_sheet_name}")
+                    with_retry(ws_jks.update, data_to_upload, range_name='A1', label=f"JKS本体/{work_sheet_name}")
+                    print(f"   -> JKS本体: '{work_sheet_name}' 更新完了")
+                except Exception as e:
+                    if isinstance(e, RetryExhaustedError): raise
+                    raise Exception(f"JKS本体への同時書き込みに失敗しました: {e}")
+
+            # force_all完了後: GASのforceAllAbsenceCheckを呼び出してTMA不在シートを上書き更新
+            if TARGET_AREA == 'force_all':
+                GAS_URL = "https://script.google.com/macros/s/AKfycbwpNRM_753x0gG5sl5_LTwxn5afUUQqezpmPb874-Stsl5aVUJBLTBk70nW5RE_mdU0/exec"
+                try:
+                    req = urllib.request.Request(
+                        f"{GAS_URL}?action=forceAllAbsenceCheck",
+                        headers={"User-Agent": "Mozilla/5.0"}
+                    )
+                    with urllib.request.urlopen(req, timeout=60) as res:
+                        gas_result = json.loads(res.read().decode())
+                        print(f"[forceAllAbsenceCheck] {gas_result}")
+                except Exception as e:
+                    print(f"!! [警告] forceAllAbsenceCheck呼び出し失敗: {e}")
+                    send_discord_notification(f"<@1474004343207366839> ⚠️ 【警告】 force_all完了後のTMA不在チェック呼び出しに失敗しました:\n```{e}```")
+
+            status_prefix = "【全件強制更新】" if TARGET_AREA == 'force_all' else "【更新完了】"
+            send_discord_notification(f"<@1474004343207366839> ✅ {status_prefix} {TARGET_AREA.upper()} 両シートの更新が完了しました！")
+        else:
+            # データが0件の場合はDiscordに警告を送る
+            print("!! [警告] スクレイピング完了しましたがデータが0件でした")
+            send_discord_notification(f"<@1474004343207366839> ⚠️ 【警告】 {TARGET_AREA.upper()} スクレイピング完了しましたがデータが0件でした。ログインや構造を確認してください。")
+
+    except Exception as e:
+        print(f"\nエラー発生のため停止: {e}")
+        if not isinstance(e, RetryExhaustedError):
+            send_discord_notification(f"<@1474004343207366839> ❌ 【重大なエラー】 {TARGET_AREA.upper()} スクレイピング停止:\n```{e}```")
+        sys.exit(1)
