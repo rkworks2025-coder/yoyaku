@@ -47,7 +47,7 @@ if NEEDS_SCRAPE:
     from selenium.webdriver.common.keys import Keys
 
 # --- Discord通知用設定 ---
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1544251683809529957/OE0Ohm2IwtzGNiIi92b4AxJB5VTNJQd7f89MSPj0-sRw-cwbvrDdg0skrTEj2lhz_kpJ"
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
 def send_discord_notification(message):
     if not DISCORD_WEBHOOK_URL: return
