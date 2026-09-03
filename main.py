@@ -179,9 +179,9 @@ if NEEDS_SCRAPE:
     else:
         try:
             inspection_sh_key = INSPECTION_SHEET_URL.split('/d/')[1].split('/edit')[0]
-            sh_inspection = gc.open_by_key(inspection_sh_key)
-            ws_inspection = sh_inspection.worksheet("inspectionlog")
-            inspection_values = ws_inspection.get_all_values()
+            sh_inspection = with_retry(gc.open_by_key, inspection_sh_key, label="inspectionlog取得(open)")
+            ws_inspection = with_retry(sh_inspection.worksheet, "inspectionlog", label="inspectionlog取得(worksheet)")
+            inspection_values = with_retry(ws_inspection.get_all_values, label="inspectionlog取得(values)")
         except Exception as e:
             print(f"!! エラー: inspectionlogの取得に失敗しました。")
             raise e
