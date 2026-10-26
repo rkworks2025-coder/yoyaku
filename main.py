@@ -123,6 +123,7 @@ INSPECTION_SHEET_URL = "https://docs.google.com/spreadsheets/d/11XglLANtnG7bCxYj
 PAGE_LOAD_TIMEOUT = 60       # 1ページの読込上限(秒)
 LOADING_WAIT_TIMEOUT = 30    # ローディング画面が消えるまでの上限(秒)
 BOX_WAIT_TIMEOUT = 10        # ローディング後、車両BOXが出るまでの上限(秒)
+TIMETABLE_WAIT_TIMEOUT = 20  # 車両BOX出現後、予約表が描画されるまでの上限(秒)
 STATION_MAX_ATTEMPTS = 3     # 1ステーションあたりの試行回数
 EMPTY_MAX_ATTEMPTS = 2       # 車両0台だった場合の試行回数（本当に0台のステーションで時間を浪費しないため少なめ）
 RETRY_BASE_WAIT = 5          # 再試行前の待機(秒)。試行ごとに倍
@@ -349,7 +350,33 @@ if NEEDS_SCRAPE:
                 raise SessionExpired("ログイン画面へ戻されました")
             return [], []
 
-        soup = BeautifulSoup(d.page_source, "lxml")
+        # ★予約表の描画待ち（車両BOXの出現後に予約表が遅れて描画されるため）
+        # 全車両BOXで予約データ行が揃うまで待つ。時間内に揃わなければ
+        # その時点の内容で判定し、未描画の車両は再試行に回す
+        def boxes_ready(x):
+            s = BeautifulSoup(x.page_source, "lxml")
+            boxes = s.find_all("div", class_="car-list-box")
+            if not boxes:
+                return False
+            for box in boxes:
+                if box.find("div", class_="car-list-title-area") is None:
+                    return False
+                tt = box.find("table", class_="timetable")
+                if tt is None:
+                    return False
+                has_data = False
+                for r in tt.find_all("tr"):
+                    cells = r.find_all("td")
+                    if cells and any(x in (cells[0].get("class", [])) for x in ["vacant", "full", "impossible", "others"]):
+                        has_data = True
+                        break
+                if not has_data:
+                    return False
+            return ("ready", s)
+        try:
+            _, soup = WebDriverWait(d, TIMETABLE_WAIT_TIMEOUT, poll_frequency=0.5).until(boxes_ready)
+        except TimeoutException:
+            soup = BeautifulSoup(d.page_source, "lxml")
         car_boxes = soup.find_all("div", class_="car-list-box")
 
         # タイムライン開始時刻取得 (DOMに依存せず現在時刻のHH:00を使用)
