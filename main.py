@@ -129,6 +129,8 @@ STATION_MAX_ATTEMPTS = 3     # 1ステーションあたりの試行回数
 EMPTY_MAX_ATTEMPTS = 2       # 車両0台だった場合の試行回数（本当に0台のステーションで時間を浪費しないため少なめ）
 RETRY_BASE_WAIT = 5          # 再試行前の待機(秒)。試行ごとに倍
 SECOND_PASS_WAIT = 30        # 失敗分をもう1周する前の待機(秒)
+RETRY_ROUNDS_MAX = 5         # ★再巡回の最大周回数（全部取れるまで繰り返すが、永久に止まらないよう上限を設ける）
+RETRY_TIME_BUDGET = 30 * 60  # ★再巡回の合計時間の上限(秒)。超えたら取れた分だけで書き込みへ進む
 
 # 3. Google認証
 SERVICE_ACCOUNT_KEY_FILE = "service_account.json"
@@ -511,18 +513,30 @@ if NEEDS_SCRAPE:
                 print(f"  !! [後回し] {station_name}: {ex}")
                 failed_indexes.append(i)
 
-        # ★失敗分をまとめてもう1周（サーバーが一時的に重かった分の回収）
+        # ★失敗分の再巡回（サーバーが一時的に重かった分の回収）
         # 未描画の車両が残ったステーションも対象にし、再取得で未描画が減った場合のみ結果を差し替える
-        partial_indexes = [i for i in range(len(target_stations)) if bad_by_index.get(i)]
-        retry_indexes = sorted(set(failed_indexes) | set(partial_indexes))
-        if retry_indexes:
-            print(f"\n[再巡回] 取得失敗 {len(failed_indexes)}件・未描画車両ありのステーション {len(partial_indexes)}件を{SECOND_PASS_WAIT}秒後に再取得します...")
+        # 全部取れるまで周回を繰り返すが、RETRY_ROUNDS_MAX周 または RETRY_TIME_BUDGET秒 で打ち切り、
+        # 取れた分だけで書き込みへ進む（1台のために全体が永久に止まり、何も書き込まれない事態を防ぐ）
+        retry_started = datetime.now().timestamp()
+        for round_no in range(1, RETRY_ROUNDS_MAX + 1):
+            partial_indexes = [i for i in range(len(target_stations)) if bad_by_index.get(i)]
+            retry_indexes = sorted(set(failed_indexes) | set(partial_indexes))
+            if not retry_indexes:
+                break
+            if datetime.now().timestamp() - retry_started > RETRY_TIME_BUDGET:
+                print(f"\n[再巡回] 合計{RETRY_TIME_BUDGET // 60}分を超えたため打ち切ります。")
+                break
+            print(f"\n[再巡回 {round_no}周目/{RETRY_ROUNDS_MAX}] 取得失敗 {len(failed_indexes)}件・未描画車両ありのステーション {len(partial_indexes)}件を{SECOND_PASS_WAIT}秒後に再取得します...")
             sleep(SECOND_PASS_WAIT)
             still_failed = []
             for n, i in enumerate(retry_indexes):
+                if datetime.now().timestamp() - retry_started > RETRY_TIME_BUDGET:
+                    print(f"   !! 再巡回が合計{RETRY_TIME_BUDGET // 60}分を超えたため、残りは打ち切ります。")
+                    still_failed.extend(j for j in retry_indexes[n:] if j not in results_by_index)
+                    break
                 item = target_stations[i]
                 station_name = item.get('station', '不明')
-                print(f"[再巡回 {n+1}/{len(retry_indexes)}] {station_name}...")
+                print(f"[再巡回{round_no} {n+1}/{len(retry_indexes)}] {station_name}...")
                 try:
                     rows, bad_plates = scrape_station(state, item)
                     if i not in results_by_index or len(bad_plates) < len(bad_by_index.get(i, [])):
