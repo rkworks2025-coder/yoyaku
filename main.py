@@ -123,7 +123,8 @@ INSPECTION_SHEET_URL = "https://docs.google.com/spreadsheets/d/11XglLANtnG7bCxYj
 PAGE_LOAD_TIMEOUT = 60       # 1ページの読込上限(秒)
 LOADING_WAIT_TIMEOUT = 30    # ローディング画面が消えるまでの上限(秒)
 BOX_WAIT_TIMEOUT = 10        # ローディング後、車両BOXが出るまでの上限(秒)
-TIMETABLE_WAIT_TIMEOUT = 20  # 車両BOX出現後、予約表が描画されるまでの上限(秒)
+TIMETABLE_WAIT_TIMEOUT = 90  # 車両BOX出現後、予約表が描画されるまでの上限(秒)
+                             # ★描画が遅い車両はリロードせず同じページのまま待つ（リロードすると描画が最初からやり直しになるため）
 STATION_MAX_ATTEMPTS = 3     # 1ステーションあたりの試行回数
 EMPTY_MAX_ATTEMPTS = 2       # 車両0台だった場合の試行回数（本当に0台のステーションで時間を浪費しないため少なめ）
 RETRY_BASE_WAIT = 5          # 再試行前の待機(秒)。試行ごとに倍
@@ -351,8 +352,8 @@ if NEEDS_SCRAPE:
             return [], []
 
         # ★予約表の描画待ち（車両BOXの出現後に予約表が遅れて描画されるため）
-        # 全車両BOXで予約データ行が揃うまで待つ。時間内に揃わなければ
-        # その時点の内容で判定し、未描画の車両は再試行に回す
+        # 全車両BOXで予約データ行が揃うまで、リロードせず同じページのまま待つ。
+        # 時間内に揃わなければその時点の内容で判定し、未描画の車両は最後の再巡回に回す
         def boxes_ready(x):
             s = BeautifulSoup(x.page_source, "lxml")
             boxes = s.find_all("div", class_="car-list-box")
@@ -376,6 +377,7 @@ if NEEDS_SCRAPE:
         try:
             _, soup = WebDriverWait(d, TIMETABLE_WAIT_TIMEOUT, poll_frequency=0.5).until(boxes_ready)
         except TimeoutException:
+            print(f"   !! 予約表が{TIMETABLE_WAIT_TIMEOUT}秒待っても揃いませんでした（描画済みの車両のみ採用）")
             soup = BeautifulSoup(d.page_source, "lxml")
         car_boxes = soup.find_all("div", class_="car-list-box")
 
@@ -427,7 +429,8 @@ if NEEDS_SCRAPE:
     # - 描画未完了・タイムアウト → 待ってから再試行
     # - セッション切れ → 再ログインして再試行
     # - ブラウザが落ちた → ドライバを作り直して再ログイン
-    # - 一部車両だけ予約表が取れない → 再試行し、最終試行では取れた分だけ採用
+    # - 一部車両だけ予約表が取れない → ★リロードによる再試行はせず、取れた分だけ採用
+    #   （同じページで最大TIMETABLE_WAIT_TIMEOUT秒待ち済み。未描画の車両は最後の再巡回で再取得）
     # - 車両0台 → EMPTY_MAX_ATTEMPTS回まで確認し、それでも0台なら0台として確定
     # 全試行失敗時は例外を送出（呼び出し側で失敗ステーションとして扱う）
     # ==========================================================
@@ -444,8 +447,8 @@ if NEEDS_SCRAPE:
                     print(f"   -> 車両0台として確定")
                     return rows, bad_plates
 
-                if bad_plates and not is_last:
-                    raise StationNotReady(f"予約表が未描画の車両あり: {', '.join(bad_plates)}")
+                if bad_plates:
+                    print(f"   !! 予約表が未描画の車両あり（再巡回で再取得）: {', '.join(bad_plates)}")
 
                 return rows, bad_plates
 
@@ -509,21 +512,26 @@ if NEEDS_SCRAPE:
                 failed_indexes.append(i)
 
         # ★失敗分をまとめてもう1周（サーバーが一時的に重かった分の回収）
-        if failed_indexes:
-            print(f"\n[再巡回] 取得失敗 {len(failed_indexes)}件を{SECOND_PASS_WAIT}秒後に再取得します...")
+        # 未描画の車両が残ったステーションも対象にし、再取得で未描画が減った場合のみ結果を差し替える
+        partial_indexes = [i for i in range(len(target_stations)) if bad_by_index.get(i)]
+        retry_indexes = sorted(set(failed_indexes) | set(partial_indexes))
+        if retry_indexes:
+            print(f"\n[再巡回] 取得失敗 {len(failed_indexes)}件・未描画車両ありのステーション {len(partial_indexes)}件を{SECOND_PASS_WAIT}秒後に再取得します...")
             sleep(SECOND_PASS_WAIT)
             still_failed = []
-            for n, i in enumerate(failed_indexes):
+            for n, i in enumerate(retry_indexes):
                 item = target_stations[i]
                 station_name = item.get('station', '不明')
-                print(f"[再巡回 {n+1}/{len(failed_indexes)}] {station_name}...")
+                print(f"[再巡回 {n+1}/{len(retry_indexes)}] {station_name}...")
                 try:
                     rows, bad_plates = scrape_station(state, item)
-                    results_by_index[i] = rows
-                    bad_by_index[i] = bad_plates
+                    if i not in results_by_index or len(bad_plates) < len(bad_by_index.get(i, [])):
+                        results_by_index[i] = rows
+                        bad_by_index[i] = bad_plates
                 except Exception as ex:
                     print(f"  !! [取得失敗] {station_name}: {ex}")
-                    still_failed.append(i)
+                    if i not in results_by_index:
+                        still_failed.append(i)
             failed_indexes = still_failed
 
         # 元の順番で組み立て
